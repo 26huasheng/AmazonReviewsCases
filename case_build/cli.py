@@ -4,6 +4,7 @@
 Examples:
 
 python -m case_build.cli discover ...
+python -m case_build.cli select ...
 python -m case_build.cli shelf ...
 """
 from __future__ import annotations
@@ -13,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .focal_selection import FocalSelectionPipeline
 from .pipeline import CaseDiscoveryPipeline, CaseShelfBuilder
 
 
@@ -53,11 +55,21 @@ def parse_args() -> argparse.Namespace:
     discover.add_argument("--time-boxes-json", type=Path)
     discover.add_argument("--evaluation-days", type=int, default=90)
 
+    select = sub.add_parser(
+        "select",
+        help="Assemble Market × time_box Cases and choose focals.",
+    )
+    select.add_argument("--evaluable-focals", required=True, type=Path)
+    select.add_argument("--behavior-components", required=True, type=Path)
+    select.add_argument("--output-dir", required=True, type=Path)
+    select.add_argument("--selection-seed", default=None)
+
     shelf = sub.add_parser(
         "shelf",
-        help="Materialize t0 shelves for an explicitly supplied Case table.",
+        help="Materialize per-focal competitors and the union Case shelf.",
     )
     shelf.add_argument("--cases", required=True, type=Path)
+    shelf.add_argument("--case-focals", required=True, type=Path)
     shelf.add_argument("--market-timeline", required=True, type=Path)
     shelf.add_argument("--rating-daily-summary", required=True, type=Path)
     shelf.add_argument("--output-dir", required=True, type=Path)
@@ -83,9 +95,20 @@ def main() -> None:
             time_boxes=_load_time_boxes(args.time_boxes_json),
             evaluation_days=args.evaluation_days,
         )
+    elif args.command == "select":
+        kwargs = {}
+        if args.selection_seed:
+            kwargs["selection_seed"] = args.selection_seed
+        pipeline = FocalSelectionPipeline(
+            args.evaluable_focals,
+            args.behavior_components,
+            args.output_dir,
+            **kwargs,
+        )
     else:
         pipeline = CaseShelfBuilder(
             args.cases,
+            args.case_focals,
             args.market_timeline,
             args.rating_daily_summary,
             args.output_dir,

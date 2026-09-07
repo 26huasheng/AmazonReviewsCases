@@ -4,6 +4,7 @@ from pathlib import Path
 
 import duckdb
 
+from market_discovery.cross_path_merge import MIN_FINAL_MARKET_PRODUCT_COUNT
 from utils import sql_literal
 
 
@@ -24,8 +25,11 @@ def write_market_products(
     copy_atomic,
     *,
     product_time_summary: Path | None = None,
+    min_product_count: int = MIN_FINAL_MARKET_PRODUCT_COUNT,
 ) -> None:
     """生成最终 Market 的长期商品 universe，一行一个 Market×product。"""
+    if min_product_count < 0:
+        raise ValueError("min_product_count must be >= 0")
     core_cols = _columns(con, product_core)
     required = {"source_partition", "product_id", "product_title"}
     missing = required - core_cols
@@ -63,13 +67,17 @@ def write_market_products(
         first_review_expr = "t.first_rating_date"
 
     copy_atomic(f"""
-        WITH expanded AS (
+        WITH eligible AS (
+            SELECT *
+            FROM read_parquet({market})
+            WHERE coalesce(product_count, len(product_ids)) >= {int(min_product_count)}
+        ), expanded AS (
             SELECT discovery_version,
                    source_partition,
                    market_id,
                    market_label,
                    CAST(product_id AS VARCHAR) AS product_id
-            FROM read_parquet({market}), unnest(product_ids) u(product_id)
+            FROM eligible, unnest(product_ids) u(product_id)
         ), m AS (
             SELECT * FROM expanded
         )

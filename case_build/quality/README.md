@@ -1,113 +1,101 @@
 # case_build/quality
 
-这一层把商品侧、用户侧、GT 和可选外部信号汇总成一张 Case 质量表，再执行显式配置的 acceptance gate。
+Quality 是两层：
+
+1. **focal quality**：按 `case_id + focal_id` 检查结构与 GT1 完整性，决定每个 focal 是否保留。
+2. **case quality**：同一 Case 删掉不合格 focal 后，只要还剩 `>=1` 个 accepted focal 就接受该 Case，并重建最终 shelf。
+
+GT1 由 `ground_truth_gt1` 按冻结口径生成；本层只消费，不重新定义、不截断人数。
 
 ```text
-case candidates
-+ shelf
-+ case users
-+ GT1 / GT2 / market truth
-+ review_activity_truth（可选）
-+ Keepa / BSR external signals（可选）
+case_focals
++ focal_competitors (selected)
++ case_shelf
++ GT1 choice_truth
         ↓
-quality_metrics.parquet
-        ↓
-quality_decisions.parquet
-        ├── accepted_cases.parquet
-        └── rejected_cases.parquet
+quality_focal_metrics.parquet
+quality_focal_decisions.parquet
+        ↓ 过滤 focal，重建 Case
+accepted_focals / rejected_focals
+accepted_cases / rejected_cases
+accepted_focal_competitors
+accepted_case_shelf
 ```
 
-## 1. 自动汇总的质量字段
-
-当前包括：
+## 正式门槛（默认冻结）
 
 ```text
-shelf_product_count
-competitor_count
-focal_rows
-focal_pre_t0_review_count
-focal_recent_review_count
-selected_user_count
-gt1_user_count
-gt2_user_count
-market_positive_user_count
-none_user_count
-none_rate
-gt2_coverage_complete
-focal_demand_count
-focal_demand_share
-focal_demand_rank
-focal_review_activity_count / rank（可选）
-```
-
-同时保留 Case Discovery 已有的：
-
-```text
-post90_rating_count
-active_competitor_count_at_t0
-market_pre_t0_review_count
-valid_t0
-evaluation_window_complete
-```
-
-## 2. 结构性检查
-
-这些直接属于数据完整性，不等真实分布：
-
-```text
-valid_t0 = true
 evaluation_window_complete = true
-shelf 中 focal 恰好一行
-GT2 用户数 == selected Case 用户数
+selected_competitor_count in [6, 16]
+GT1 合格用户数 >= 20
+history_product_count >= 3
+days_since_last_event <= 365
 ```
 
-## 3. 研究阈值
+GT1 **没有**最大人数。全部 GT1 用户保留。
 
-以下门槛全部通过 JSON 配置，可为空：
+未来 choice / demand / post90 / review activity **只统计，不作为 acceptance gate**。
+即使窗口内没人选 focal 自己，只要 competitor∈[6,16]、GT1 users≥20、结构完整，也可以通过。
+
+默认不启用：
 
 ```text
-min_shelf_products
-min_competitors
-min_selected_users
-min_gt1_users
 min_market_positive_users
 max_none_rate
 min_focal_demand_count
 min_post90_rating_count
 min_market_pre_t0_review_count
 require_review_activity_truth
+max_gt1_users
 ```
 
-仓库没有重新把 v5 的 `post90>=50 / competitor>=5 / 8+8` 偷偷写回默认规则。
+## Focal 结构检查
 
-## 4. 外部销量 / BSR 接口
+任一失败则该 focal reject：
 
-`--external-signals` 可以传一张以 `case_candidate_id` 为键的 Parquet。Quality stage 会把其它列直接拼到 `quality_metrics`。
+- focal 必须在对应 Case shelf 上
+- competitor ≠ focal，且同一 focal 下不重复
+- selected competitor 数与关系表一致，且 ∈[6,16]
+- 每个 selected competitor 在 Case shelf 上
+- 每个 selected competitor 满足 `first_rating_date < t0` 且 `last_rating_date >= t0`
+- local shelf = focal ∪ 该 focal 的 selected competitors
 
-因此 Keepa 接入以后可以增加例如：
+## GT1 完整性检查
+
+- GT1 user 数 = `choice_truth` 中该 focal 去重 `user_id`
+- `(case_id, focal_id, user_id)` 唯一
+- choice `product_id` 非空且属于该 focal 的 local shelf
+- `event_time ∈ [t0, evaluation_end_exclusive)`
+- `history_product_count >= 3` 且 `days_since_last_event <= 365`
+- first_observed_event reducer 结果唯一
+- 若有 raw window events，choice 必须能追溯到窗口事件
+- GT1 合格用户数 ≥ 20
+
+## Case 层
+
+不把多个 focal 的 GT1 人数相加做门槛。
 
 ```text
-focal_bsr_available
-market_bsr_coverage
-external_sales_proxy_rank
-external_quality_pass
+accepted_focal_count >= 1  → Case accepted
+accepted_focal_count = 0   → Case rejected
 ```
 
-获取 Keepa 数据本身单独实现，Quality Gate 不依赖某个具体供应商 API。
+多 focal Case 中某个 focal reject 只删除该 focal。最终 `accepted_case_shelf` 是剩余 accepted focals 及其 selected competitors 的 `product_id` union，不为被删 focal 残留商品。
 
-## 5. 运行
+主键：focal = `case_id + focal_id`；case = `case_id`。不再使用 `focal_rows=1` 或 `case_candidate_id` 作为 Quality 主键。
+
+## 运行
 
 ```bash
 python -m case_build.quality.cli \
   --cases /path/to/cases.parquet \
+  --case-focals /path/to/case_focals.parquet \
   --case-shelf /path/to/case_shelf.parquet \
-  --case-users /path/to/case_users.parquet \
-  --choice-truth /path/to/choice_truth.parquet \
-  --population-truth /path/to/population_truth.parquet \
-  --market-truth /path/to/market_truth.parquet \
-  --review-activity-truth /path/to/review_activity_truth.parquet \
-  --rules-json quality_rules.json \
+  --focal-competitors /path/to/focal_competitors.parquet \
+  --choice-truth /path/to/ground_truth_gt1/choice_truth.parquet \
+  --gt1-users /path/to/gt1_users.parquet \
+  --gt1-raw-outcomes /path/to/_work/gt1_raw_outcomes.parquet \
+  --gt1-shelf-events /path/to/_work/gt1_shelf_events.parquet \
+  --timeline /path/to/market_product_timeline.parquet \
   --output-dir outputs/quality
 ```
-
-未冻结事项见 [`TODO.md`](TODO.md)。

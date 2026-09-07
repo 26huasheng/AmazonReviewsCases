@@ -36,7 +36,11 @@ MARKET
 # 2. 完整流程
 
 ```text
-Amazon Reviews / v5 upstream data
+Amazon Reviews 2023
+        │
+        ▼
+     data_prep
+  全量下载 + 初筛表
         │
         ├──────────────────────────────┐
         ▼                              ▼
@@ -96,6 +100,7 @@ population_scan                  market_discovery
 
 | 模块 | 主要职责 | 状态 |
 |---|---|---|
+| `data_prep/` | 全量下载 + Market Discovery 前基础表 | **已有代码** |
 | `population_scan/` | 大类级用户基础盘点 | **已有代码** |
 | `market_discovery/` | local Market Discovery + 安全 cross-path 同名合并 | **已有代码** |
 | `market_build/` | Market 商品、shared population、用户事件与累计历史 | **已有代码** |
@@ -199,7 +204,7 @@ Final Market
 → evaluation window
 ```
 
-结构完整的新品事件都先保留。旧的“每时间段只选 top-1 focal”、`post90>=50`、固定 competitor 数不再在这里提前筛。
+结构完整的新品事件都先进入 focal candidate pool。正式 Case 由 Market × time_box 组装，一个 Case 可有多个 focal。旧的“每时间段只选 top-1 focal”、`post90>=50`、固定 competitor 数不再在这里提前筛。
 
 ## 6.2 t0 Shelf
 
@@ -429,7 +434,7 @@ Top-150
 # 12. 目录
 
 ```text
-AmazonReviewrsCases/
+AmazonReviewsCases/
 ├── README.md
 ├── SCHEMA.md
 ├── TODO.md
@@ -437,6 +442,7 @@ AmazonReviewrsCases/
 ├── paths.py
 ├── utils.py
 │
+├── data_prep/
 ├── population_scan/
 ├── market_discovery/
 ├── market_build/

@@ -4,11 +4,9 @@
 
 ## 输入
 
-支持：
+正式用户池扫描使用 Amazon **full review JSONL**（`raw/review_categories/<Category>.jsonl`）。
 
-- Amazon `rating_only` 风格 CSV / TSV；
-- 已整理的 Parquet 事件表；
-- `AmazonReviewrepo@v5` 的 `rating_event_store/` 目录。
+仍可读取 CSV / Parquet / event store，但 `data_prep` 默认走 review JSONL。
 
 代码会识别常见字段：
 
@@ -26,6 +24,7 @@ verified_purchase（可选）
 ```text
 <output-dir>/
 ├── users.parquet
+├── review_events.parquet   # 瘦事件表：无评论文本，JSONL 只扫一次
 └── summary.json
 ```
 
@@ -43,9 +42,10 @@ last_event_date
 
 口径固定为：
 
-- `n_events`：每条观测评分/评论事件计一次；
-- `n_products`：该用户在当前大类碰过的不同商品数；
-- `verified_purchase` 有则另计，不把公开 Review 数据说成完整订单流水；
+- `n_events`：JSONL 里每一条评论计一次，**包括 text 为空的评论**；
+- `n_products`：该用户在当前大类碰过的不同 `parent_asin` 数；
+- `verified_purchase` 有则另计；
+- `min_history=2`：只保留至少两条评论的用户，只有一条评论的不进池；
 - 本层不做 `t0` 截断。
 
 `summary.json` 记录用户量、事件量、用户历史厚度分位数、单次用户比例、输入字段解析方式等，后面用来定 Case 用户资格阈值。

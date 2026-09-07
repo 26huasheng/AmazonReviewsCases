@@ -4,7 +4,7 @@
 
 ## 0. Upstream 基础数据
 
-当前新仓库优先复用 `AmazonReviewrepo@v5` 已经能够产出的基础表：
+`data_prep/` 下载 Amazon Reviews 2023 一个大类的全量源文件（rating-only、metadata、full reviews），并做成 Market Discovery 之前的基础表。本地文件通过校验后不重下。
 
 ```text
 product_core.parquet
@@ -142,19 +142,22 @@ case_candidates.parquet
 case_candidates_evaluable.parquet
 ```
 
-这里只筛结构完整的时间事件，不执行最终质量阈值。
+这里只筛结构完整的新品进入事件（focal candidate pool），不产生正式 Case，不执行最终质量阈值。
+
+然后 `case_build select` 按 Market × time_box 选 focal，写出 `cases.parquet` / `case_focals.parquet`。
 
 ---
 
 ## 5. Case Shelf：先生成完整时间资格池
 
 ```text
-明确传入的一批 cases
+cases + case_focals
 market_product_timeline.parquet
 rating_daily_summary.parquet
     ↓
 case_build shelf
     ↓
+focal_competitors.parquet
 case_shelf.parquet
 ```
 
@@ -245,7 +248,7 @@ case_shelf_selected.parquet
 然后：
 
 ```text
-cases
+cases（含 population_cutoff）
 market_population.parquet
 三套 user history cumulative
     ↓
@@ -268,9 +271,10 @@ case_users.parquet
 ## 7. Ground Truth
 
 ```text
-cases
+cases + case_focals
 case_users.parquet
 case_shelf_selected.parquet
+focal_competitors.parquet
 canonical_user_events.parquet
 rating_daily_summary.parquet（可选）
     ↓
@@ -313,25 +317,30 @@ case_shelf_with_external.parquet
 ## 9. Quality Gate
 
 ```text
-cases
-最终 case_shelf
-case_users
-GT1 / GT2 / market truth
-review_activity_truth（可选）
-case_external_signals（可选）
-quality_rules.json
+cases + case_focals
+case_shelf + focal_competitors
+GT1 choice_truth（ground_truth_gt1）
+quality_rules.json（默认 min_competitors=6, max=16, min_gt1_users=20）
     ↓
 case_build.quality
 ```
 
-输出：
+先做 focal quality，再重建 Case：
 
 ```text
-quality_metrics.parquet
-quality_decisions.parquet
+quality_focal_metrics.parquet
+quality_focal_decisions.parquet
+quality_case_metrics.parquet
+quality_case_decisions.parquet
+accepted_focals.parquet
+rejected_focals.parquet
 accepted_cases.parquet
 rejected_cases.parquet
+accepted_focal_competitors.parquet
+accepted_case_shelf.parquet
 ```
+
+Case 接受 ⇔ 至少 1 个 accepted focal。GT1 不截断人数。未来 choice 不作为 Quality 门槛。
 
 ---
 

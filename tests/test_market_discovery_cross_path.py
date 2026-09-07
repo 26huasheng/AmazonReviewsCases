@@ -76,7 +76,7 @@ def test_materialization_writes_final_market_and_summary(tmp_path: Path) -> None
         _market("local_a", "phone_case", "path_a", ["P1"]),
     ])
 
-    summary = merge_exact_normalized_markets(tmp_path)
+    summary = merge_exact_normalized_markets(tmp_path, min_product_count=1)
     final_rows = read_market_csv(tmp_path / "final_market.csv")
 
     assert summary["merge_policy"] == MERGE_POLICY
@@ -88,3 +88,18 @@ def test_materialization_writes_final_market_and_summary(tmp_path: Path) -> None
     assert (tmp_path / "cross_path_exact_merge_audit.json").is_file()
     assert final_rows[0]["market_label"] == "phone_case"
     assert final_rows[0]["product_ids"] == ["P1", "P2"]
+
+
+def test_small_merged_markets_are_dropped_from_final_market(tmp_path: Path) -> None:
+    write_market_csv(tmp_path / "first_market.csv", [
+        _market("local_small", "tiny_case", "path_a", [f"P{i}" for i in range(8)]),
+        _market("local_keep", "big_case", "path_b", [f"Q{i}" for i in range(9)]),
+    ])
+    summary = merge_exact_normalized_markets(tmp_path)
+    final_rows = read_market_csv(tmp_path / "final_market.csv")
+    assert summary["merged_market_count"] == 2
+    assert summary["final_market_count"] == 1
+    assert summary["dropped_small_market_count"] == 1
+    assert summary["min_product_count"] == 9
+    assert [row["market_label"] for row in final_rows] == ["big_case"]
+    assert final_rows[0]["product_count"] == 9

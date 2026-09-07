@@ -37,6 +37,12 @@ def _source_relation(events: Path) -> tuple[str, str]:
         raise ValueError(f"no parquet files under {events}")
     if events.suffix.lower() == ".parquet":
         return f"read_parquet({sql_literal(str(events))})", "parquet"
+    if events.suffix.lower() == ".jsonl":
+        return (
+            f"read_json({sql_literal(str(events))}, format='newline_delimited', "
+            "ignore_errors=true, maximum_object_size=134217728)",
+            "jsonl_reviews",
+        )
     if events.suffix.lower() in {".csv", ".tsv"}:
         delim = "'\\t'" if events.suffix.lower() == ".tsv" else "','"
         return (

@@ -1,6 +1,16 @@
 # case_build/ground_truth
 
-这一层在 **Case 用户已经固定以后** 查询 evaluation window 的真实 Amazon 事件，构造两层 Ground Truth。
+GT1 不再从预先抽的 `case_users` 里筛。对每个 focal：
+
+```text
+局部货架 = focal + selected competitors
+窗口 = [t0, t0+90)
+窗口内对货架任意商品有真实评分的用户
+再过滤 t0 前 history>=3 且 recency<=365
+first_observed_event → choice_truth
+```
+
+GT2 仍可用可选的 `case_users` union（Market + background）看 product / none。
 
 ```text
 cases

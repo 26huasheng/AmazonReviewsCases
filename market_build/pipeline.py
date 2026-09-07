@@ -6,6 +6,7 @@ from typing import Any
 
 import duckdb
 
+from market_discovery.cross_path_merge import MIN_FINAL_MARKET_PRODUCT_COUNT
 from utils import sql_literal, write_json
 from .history import write_user_history_indexes
 from .population import write_market_population
@@ -14,6 +15,11 @@ from .user_events import (
     write_canonical_user_events,
     write_user_event_store,
     write_user_event_store_manifest,
+)
+from .behavior_graph.components import write_behavior_components
+from .behavior_graph.full_graph import (
+    write_product_graph_degrees,
+    write_strong_copreview_edges,
 )
 
 
@@ -34,6 +40,7 @@ class MarketBuildPipeline:
         population_size: int | None = None,
         population_seed: str = "market_population_v1",
         user_bucket_count: int = 256,
+        min_product_count: int = MIN_FINAL_MARKET_PRODUCT_COUNT,
     ) -> None:
         self.final_market = final_market.expanduser().resolve()
         self.product_core = product_core.expanduser().resolve()
@@ -49,6 +56,9 @@ class MarketBuildPipeline:
         self.population_size = population_size
         self.population_seed = population_seed
         self.user_bucket_count = user_bucket_count
+        if min_product_count < 0:
+            raise ValueError("min_product_count must be >= 0")
+        self.min_product_count = min_product_count
         for path in (
             self.final_market, self.product_core, self.user_events, self.user_summary
         ):
@@ -66,14 +76,26 @@ class MarketBuildPipeline:
         self.user_history_path = self.output_dir / "user_history_cumulative.parquet"
         self.user_category_history_path = self.output_dir / "user_category_history_cumulative.parquet"
         self.user_market_history_path = self.output_dir / "user_market_history_cumulative.parquet"
+        self.graph_dir = self.output_dir / "behavior_graph"
+        self.graph_edges_path = self.graph_dir / "full_graph_edges.parquet"
+        self.graph_degrees_path = self.work_dir / "product_graph_degrees.parquet"
+        self.behavior_components_path = (
+            self.output_dir / "market_behavior_components.parquet"
+        )
+        self.behavior_component_summary_path = (
+            self.output_dir / "market_behavior_component_summary.parquet"
+        )
+        self.full_graph_components_path = self.graph_dir / "full_graph_components.parquet"
         self.summary_path = self.output_dir / "market_build_summary.json"
 
         self.con = duckdb.connect()
         self.con.execute("SET TimeZone='UTC'")
         self.con.execute("SET preserve_insertion_order=false")
+        self.con.execute("SET memory_limit='100GB'")
         temp = self.output_dir / ".duckdb_tmp"
         temp.mkdir(parents=True, exist_ok=True)
         self.con.execute(f"SET temp_directory={sql_literal(str(temp))}")
+        self.con.execute("SET max_temp_directory_size='400GiB'")
 
     def close(self) -> None:
         self.con.close()
@@ -118,7 +140,17 @@ class MarketBuildPipeline:
             self.market_products_path,
             self._copy_atomic,
             product_time_summary=self.product_time_summary,
+            min_product_count=self.min_product_count,
         )
+        market_count = int(self.con.execute(
+            "SELECT count(DISTINCT market_id) FROM read_parquet(?)",
+            [str(self.market_products_path)],
+        ).fetchone()[0])
+        if market_count == 0:
+            raise ValueError(
+                f"no markets with product_count >= {self.min_product_count} "
+                f"in {self.final_market}"
+            )
         write_market_population(
             self.con,
             self.market_products_path,
@@ -138,6 +170,33 @@ class MarketBuildPipeline:
             self.user_market_history_path,
             self._copy_atomic,
         )
+        self.graph_dir.mkdir(parents=True, exist_ok=True)
+        write_product_graph_degrees(
+            self.con,
+            self.market_products_path,
+            self.canonical_events_path,
+            self.graph_degrees_path,
+            self._copy_atomic,
+        )
+        write_strong_copreview_edges(
+            self.con,
+            self.market_products_path,
+            self.canonical_events_path,
+            self.graph_edges_path,
+            self._copy_atomic,
+        )
+        graph_stats = write_behavior_components(
+            self.con,
+            self.graph_degrees_path,
+            self.graph_edges_path,
+            self.behavior_components_path,
+            self.behavior_component_summary_path,
+            self._copy_atomic,
+        )
+        self._copy_atomic(
+            f"SELECT * FROM read_parquet({sql_literal(str(self.behavior_components_path))})",
+            self.full_graph_components_path,
+        )
 
         payload = {
             "status": "COMPLETE",
@@ -145,10 +204,8 @@ class MarketBuildPipeline:
             "population_source": self.population_source,
             "population_size_cap": self.population_size,
             "population_seed": self.population_seed,
-            "market_count": int(self.con.execute(
-                "SELECT count(DISTINCT market_id) FROM read_parquet(?)",
-                [str(self.market_products_path)],
-            ).fetchone()[0]),
+            "min_product_count": self.min_product_count,
+            "market_count": market_count,
             "market_product_rows": int(self.con.execute(
                 "SELECT count(*) FROM read_parquet(?)",
                 [str(self.market_products_path)],
@@ -161,6 +218,7 @@ class MarketBuildPipeline:
                 "SELECT count(*) FROM read_parquet(?)",
                 [str(self.canonical_events_path)],
             ).fetchone()[0]),
+            "behavior_graph": graph_stats,
             "future_conditioned_population_selection": False,
         }
         write_json(self.summary_path, payload)

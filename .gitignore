@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.duckdb_tmp/
+*.part
+outputs/
+*.parquet
+*.log
+.DS_Store

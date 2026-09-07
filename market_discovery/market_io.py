@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+# Electronics first_market rows can have product_id arrays larger than the
+# default 128KiB csv field limit.
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
 import duckdb
 

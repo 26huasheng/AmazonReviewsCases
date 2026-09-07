@@ -11,6 +11,7 @@ from pathlib import Path
 
 from paths import default_output_root
 from utils import configure_logging
+from .cross_path_merge import MIN_FINAL_MARKET_PRODUCT_COUNT
 from .discovery_pipeline import MarketDiscoveryPipeline
 from .market_llm import FixtureMarketLLMClient, MarketLLMClient
 
@@ -47,6 +48,15 @@ def parse_args() -> argparse.Namespace:
         help="Concurrent LLM calls for path-local round-1 discovery (default: 3)",
     )
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--min-market-products",
+        type=int,
+        default=MIN_FINAL_MARKET_PRODUCT_COUNT,
+        help=(
+            "Drop merged markets with fewer products than this from final_market "
+            f"(default: {MIN_FINAL_MARKET_PRODUCT_COUNT})"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -57,6 +67,8 @@ def main() -> None:
         raise SystemExit("--max-paths must be positive")
     if args.llm_workers is not None and args.llm_workers <= 0:
         raise SystemExit("--llm-workers must be positive")
+    if args.min_market_products < 0:
+        raise SystemExit("--min-market-products must be >= 0")
 
     pipeline = MarketDiscoveryPipeline(
         args.product_core,
@@ -64,6 +76,7 @@ def main() -> None:
         args.discovery_version,
         args.source_partition,
         args.product_core_cleaning,
+        min_final_market_product_count=args.min_market_products,
     )
     try:
         summary = pipeline.prepare_local_evidence()

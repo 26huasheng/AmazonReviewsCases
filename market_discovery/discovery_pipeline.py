@@ -12,7 +12,10 @@ from typing import Any, Iterable
 
 import duckdb
 
-from .cross_path_merge import merge_exact_normalized_markets
+from .cross_path_merge import (
+    MIN_FINAL_MARKET_PRODUCT_COUNT,
+    merge_exact_normalized_markets,
+)
 from .discovery_rules import (
     DISCOVERY_SEED,
     ROUND2_MAX_TITLES,
@@ -73,6 +76,7 @@ class MarketDiscoveryPipeline:
         discovery_version: str,
         source_partition: str | None = None,
         product_core_cleaning: Path | None = None,
+        min_final_market_product_count: int = MIN_FINAL_MARKET_PRODUCT_COUNT,
     ) -> None:
         self.product_core = product_core.expanduser().resolve()
         self.output_dir = output_root.expanduser().resolve() / discovery_version
@@ -81,6 +85,9 @@ class MarketDiscoveryPipeline:
         self.product_core_cleaning = (
             product_core_cleaning.expanduser().resolve() if product_core_cleaning else None
         )
+        if min_final_market_product_count < 0:
+            raise ValueError("min_final_market_product_count must be >= 0")
+        self.min_final_market_product_count = min_final_market_product_count
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect()
         self.con.execute("SET threads=4")
@@ -518,7 +525,11 @@ class MarketDiscoveryPipeline:
         self._write_path_summary()
         self._write_first_market()
         cross_audit = self._write_cross_path_audit()
-        exact_merge = merge_exact_normalized_markets(self.output_dir, self.con)
+        exact_merge = merge_exact_normalized_markets(
+            self.output_dir,
+            self.con,
+            min_product_count=self.min_final_market_product_count,
+        )
         return {
             "processed_paths": len(selected),
             "cross_path_audit": cross_audit,

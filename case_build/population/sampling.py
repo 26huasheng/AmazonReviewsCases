@@ -31,25 +31,25 @@ def write_case_user_sample(
     )
     copy_atomic(f"""
         WITH eligible AS (
-            SELECT * FROM read_parquet({src}) WHERE eligible_pre_t0
+            SELECT * FROM read_parquet({src}) WHERE eligible_pre_cutoff
         ), ranked AS (
             SELECT *,
                    row_number() OVER (
-                       PARTITION BY case_candidate_id
+                       PARTITION BY case_id
                        ORDER BY sha256(CAST(to_json(list_value(
-                           {seed_sql}, case_candidate_id, user_id
+                           {seed_sql}, case_id, user_id
                        )) AS VARCHAR)), user_id
                    ) AS sample_rank
             FROM eligible
         )
-        SELECT case_candidate_id,
+        SELECT case_id,
                market_id,
                source_partition,
-               t0,
+               population_cutoff,
                user_id,
                relation_stratum,
                sample_rank::BIGINT
         FROM ranked
         {where}
-        ORDER BY case_candidate_id, sample_rank
+        ORDER BY case_id, sample_rank
     """, destination)

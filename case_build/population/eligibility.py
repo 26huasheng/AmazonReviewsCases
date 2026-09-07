@@ -67,10 +67,10 @@ def write_case_user_eligibility(
     )
     copy_atomic(f"""
         SELECT *,
-               ({pass_expr}) AS eligible_pre_t0,
+               ({pass_expr}) AS eligible_pre_cutoff,
                {reason_expr} AS ineligible_reason
         FROM read_parquet({src})
-        ORDER BY case_candidate_id, user_id
+        ORDER BY case_id, user_id
     """, destination)
 
 
@@ -100,7 +100,7 @@ def write_threshold_scan(
         con.executemany("INSERT INTO population_threshold_grid VALUES (?, ?)", rows)
     src = sql_literal(str(features))
     copy_atomic(f"""
-        SELECT f.case_candidate_id,
+        SELECT f.case_id,
                g.min_history_products,
                g.max_days_since_last_event,
                count(*)::BIGINT AS population_count,
@@ -123,10 +123,10 @@ def write_threshold_scan(
                )::BIGINT AS eligible_with_category_history
         FROM read_parquet({src}) f
         CROSS JOIN population_threshold_grid g
-        GROUP BY f.case_candidate_id,
+        GROUP BY f.case_id,
                  g.min_history_products,
                  g.max_days_since_last_event
-        ORDER BY f.case_candidate_id,
+        ORDER BY f.case_id,
                  g.min_history_products,
                  g.max_days_since_last_event
     """, destination)

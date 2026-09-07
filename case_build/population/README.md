@@ -1,12 +1,18 @@
 # case_build/population
 
-这一层负责：**Case 的 focal / t0 / shelf 已经确定以后，只用 t0 以前的用户历史，从 Market shared population 中选出本 Case 的固定用户集合。**
+这一层把用户拆成两套 cohort，**Market 用户不再经过大类随机 2 万截断**：
+
+```text
+case_market_users.parquet       # 完整高质量 Market-history 用户，GT1 核心
+case_background_users.parquet   # 大类无 Market 历史用户，质量筛选后抽样，GT2 扩展
+case_population_users.parquet   # union，带 user_group，只给 GT2 用
+```
 
 主链：
 
 ```text
 Market shared population
-+ Case t0
++ Case population_cutoff
 + 用户历史累计索引
         ↓
 case_user_features.parquet
@@ -99,13 +105,21 @@ python -m case_build.population.cli \
   --user-history outputs/market_build/user_history_cumulative.parquet \
   --user-category-history outputs/market_build/user_category_history_cumulative.parquet \
   --user-market-history outputs/market_build/user_market_history_cumulative.parquet \
-  --min-history-products 5 \
+  --min-history-products 3 \
   --max-days-since-last-event 365 \
-  --target-users-per-case 2000 \
+  --target-users-per-case 1000 \
   --output-dir outputs/case_population
 ```
 
-上面的 `5 / 365 / 2000` 只是调用示例，不代表 benchmark 已冻结规则。
+当前冻结的正式资格 / 抽样：
+
+```text
+min_history_products = 3
+max_days_since_last_event = 365
+min_category_products = None
+min_market_products = None
+target_users_per_case = 1000
+```
 
 ## 6. 关键约束
 

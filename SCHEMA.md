@@ -1,6 +1,6 @@
 # SEMS Benchmark Data Schema
 
-本文件定义 `AmazonReviewrsCases` 最终 benchmark 产物。主结构固定为 **Market → Cases**：Market 保存可以被多个 Case 复用的商品与人口资产；Case 保存一次具体新品进入事件自己的 `t0 / shelf / users / GT`。
+本文件定义 `AmazonReviewsCases` 最终 benchmark 产物。主结构固定为 **Market → Cases**。Case 是 **Final Market × time_box**：一个 Case 可含 1 个或少数几个 focal，共享 users 与 union shelf；GT 保留到 focal 粒度。
 
 ---
 
@@ -121,14 +121,10 @@ Market population 可用的共享用户轨迹：
 {
   "case_id": "case_001",
   "market_id": "market_001",
-  "focal_product_id": "B0XXXXX",
-  "t0": "2022-09-15",
-  "evaluation": {
-    "start": "2022-09-15",
-    "end_exclusive": "2022-12-14",
-    "days": 90
-  },
-  "n_shelf_products": 8,
+  "time_box_id": "2022-H2",
+  "n_focals": 2,
+  "population_cutoff": "2022-07-03",
+  "n_shelf_products": 18,
   "n_selected_users": 2000,
   "quality_status": "accepted"
 }
@@ -142,23 +138,24 @@ Market population 可用的共享用户轨迹：
 
 | 字段 | 含义 |
 |---|---|
-| `case_id` | Case ID；构建阶段对应稳定 `case_candidate_id` |
+| `case_id` | Case ID = hash(source_partition, market_id, time_box_id) |
 | `market_id` | 所属 Final Market |
-| `focal_product_id` | 本次新品 focal |
-| `t0` | 当前由 focal `first_review_date` 近似 |
-| `evaluation.start` | GT 窗口起点 |
-| `evaluation.end_exclusive` | GT 窗口右开端点 |
-| `evaluation.days` | 评测窗口长度 |
-| `n_shelf_products` | t0 shelf 商品数 |
+| `time_box_id` | 时间段 |
+| `n_focals` | 本 Case 选中的 focal 数 |
+| `population_cutoff` | 共享用户历史截断，当前 `min(focal.t0)` |
+| `n_shelf_products` | union shelf 商品数 |
 | `n_selected_users` | 本 Case 固定用户数 |
 | `quality_status` | 最终质量状态 |
+
+每个 focal 自己的 `t0` / evaluation window 在 `case_focals` / GT 行上，不挤进单一 Case manifest 字段。
 
 ## 4.2 `shelf.parquet`
 
 | 字段 | 含义 |
 |---|---|
 | `product_id` | 商品键 |
-| `role` | `focal` / `competitor` |
+| `is_focal` | 是否为本 Case 的某个 focal |
+| `is_competitor` | 是否为某个 focal 的 selected competitor；可与 `is_focal` 同时为真 |
 | `pre_t0_review_count` | t0 前累计评论 / 评分事件量 |
 | `pre_t0_rating_mean` | t0 前平均评分，可为空 |
 | `price_at_t0` | 历史 t0 价格，可获得时保存 |
@@ -194,8 +191,9 @@ user_id
 
 | 字段 | 含义 |
 |---|---|
+| `case_id` / `focal_id` | Case × focal |
 | `user_id` | 用户键 |
-| `target_product_id` | 确定目标商品 |
+| `product_id` | 确定目标商品 |
 | `event_timestamp` | 被 outcome policy 选中的目标事件时间 |
 
 GT1 不包含 `none`。
@@ -206,6 +204,7 @@ GT1 不包含 `none`。
 
 | 字段 | 含义 |
 |---|---|
+| `case_id` / `focal_id` | Case × focal |
 | `user_id` | 用户键 |
 | `outcome_product_id` | 真实商品结果；无目标交互时为空 |
 | `event_timestamp` | 有商品 outcome 时对应事件时间，否则为空 |
@@ -227,7 +226,8 @@ outcome_product_id = NULL        -> none
 
 | 字段 | 含义 |
 |---|---|
-| `product_id` | shelf 商品 |
+| `case_id` / `focal_id` | Case × focal |
+| `product_id` | 该 focal 局部货架商品 |
 | `demand_count` | GT2 中命中该商品的用户数 |
 | `demand_share` | 在 market-positive 用户中的份额 |
 | `rank` | 按 `demand_count` 排名，确定性 tie-break 用 `product_id` |
@@ -320,8 +320,16 @@ case_build/ground_truth/
   market_truth.parquet
 
 case_build/quality/
-  quality_metrics.parquet
+  quality_focal_metrics.parquet
+  quality_focal_decisions.parquet
+  quality_case_metrics.parquet
+  quality_case_decisions.parquet
+  accepted_focals.parquet
+  rejected_focals.parquet
   accepted_cases.parquet
+  rejected_cases.parquet
+  accepted_focal_competitors.parquet
+  accepted_case_shelf.parquet
 
 benchmark_split/
   split_assignments.parquet
@@ -338,13 +346,13 @@ benchmark_split/
 ```text
 Market product universe 可复用
 Case shelf 属于所属 Market
-每个 Case 恰好一个 focal
+Case = Market × time_box，含 1 个或少数 focal
 Case users 属于 Market shared population
-Case population 在 future GT 查询前固定
-GT2 覆盖全部 Case users
-GT2 product outcome 只能是 shelf product / none
-GT1 == GT2 positives
-market_truth == GT2 聚合
+Case population 在 future GT 查询前固定（cutoff = min focal t0）
+每个 focal 的 GT2 覆盖全部 Case users
+每个 focal 的 GT2 product outcome 只能是该 focal 局部货架 / none
+GT1 == GT2 positives（同一 Case×focal）
+market_truth == 该 focal 的 GT2 聚合
 split 对 accepted cases 一一覆盖
 ```
 

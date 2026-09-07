@@ -12,6 +12,8 @@ from .market_io import csv_to_parquet, read_market_csv, write_market_csv
 
 
 MERGE_POLICY = "exact_normalized_market_label_v1"
+# Keep markets with strictly more than this many products in final_market.
+MIN_FINAL_MARKET_PRODUCT_COUNT = 9
 
 
 def _dedupe_paths(values: list[list[str]]) -> list[list[str]]:
@@ -107,9 +109,33 @@ def merge_exact_normalized_rows(
     return final_rows, audit_rows
 
 
+def _apply_min_product_count(
+    rows: list[dict[str, Any]],
+    min_product_count: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if min_product_count < 0:
+        raise ValueError("min_product_count must be >= 0")
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for row in rows:
+        if int(row["product_count"]) >= min_product_count:
+            kept.append(row)
+        else:
+            dropped.append({
+                "market_id": row["market_id"],
+                "market_label": row["market_label"],
+                "source_partition": row["source_partition"],
+                "product_count": int(row["product_count"]),
+                "drop_reason": f"product_count<{min_product_count}",
+            })
+    return kept, dropped
+
+
 def merge_exact_normalized_markets(
     discovery_dir: Path,
     con: duckdb.DuckDBPyConnection | None = None,
+    *,
+    min_product_count: int = MIN_FINAL_MARKET_PRODUCT_COUNT,
 ) -> dict[str, Any]:
     """Materialize ``final_market`` from ``first_market`` with no merge-time LLM calls."""
     discovery = discovery_dir.expanduser().resolve()
@@ -118,7 +144,8 @@ def merge_exact_normalized_markets(
         raise FileNotFoundError(first_csv)
 
     first_markets = read_market_csv(first_csv)
-    final_rows, audit_rows = merge_exact_normalized_rows(first_markets)
+    merged_rows, audit_rows = merge_exact_normalized_rows(first_markets)
+    final_rows, dropped_rows = _apply_min_product_count(merged_rows, min_product_count)
 
     final_csv = discovery / "final_market.csv"
     final_parquet = discovery / "final_market.parquet"
@@ -141,17 +168,31 @@ def merge_exact_normalized_markets(
         encoding="utf-8",
     )
 
+    dropped_path = discovery / "dropped_small_markets.json"
+    dropped_path.write_text(
+        json.dumps({
+            "min_product_count": min_product_count,
+            "dropped_market_count": len(dropped_rows),
+            "markets": dropped_rows,
+        }, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
     summary = {
         "status": "COMPLETE",
         "merge_policy": MERGE_POLICY,
         "llm_merge_used": False,
+        "min_product_count": min_product_count,
         "local_market_count": len(first_markets),
+        "merged_market_count": len(merged_rows),
         "final_market_count": len(final_rows),
+        "dropped_small_market_count": len(dropped_rows),
         "merged_group_count": len(audit_rows),
-        "removed_by_merge_count": len(first_markets) - len(final_rows),
+        "removed_by_merge_count": len(first_markets) - len(merged_rows),
         "final_market_csv": str(final_csv),
         "final_market_parquet": str(final_parquet),
         "audit_file": str(audit_path),
+        "dropped_small_markets_file": str(dropped_path),
     }
     (discovery / "cross_path_exact_merge_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",

@@ -60,27 +60,25 @@ def write_product_rating_cumulative(
     """, destination)
 
 
-def write_shelf_members(
+def write_focal_competitor_candidates(
     con: duckdb.DuckDBPyConnection,
+    case_focals: Path,
     cases_path: Path,
     timeline_path: Path,
     destination: Path,
     copy_atomic,
 ) -> None:
-    """给明确传入的 Case 集合构造 t0 货架，不对全部候选 Case 自动展开。"""
-    case_columns = _columns(con, cases_path)
+    """每个 focal 单独找 t0 时仍活跃的同 Market competitor 池。"""
+    focal_columns = _columns(con, case_focals)
     required = {
-        "case_candidate_id",
-        "source_partition",
-        "discovery_version",
-        "market_id",
-        "market_label",
+        "case_id",
+        "focal_id",
         "focal_product_id",
         "t0",
     }
-    missing = required - case_columns
+    missing = required - focal_columns
     if missing:
-        raise ValueError(f"cases table missing columns: {sorted(missing)}")
+        raise ValueError(f"case_focals missing columns: {sorted(missing)}")
 
     timeline_columns = _columns(con, timeline_path)
     required_timeline = {
@@ -98,31 +96,31 @@ def write_shelf_members(
             f"market timeline missing columns: {sorted(missing_timeline)}"
         )
 
-    duplicate_cases = con.execute("""
-        SELECT case_candidate_id, count(*)
+    duplicate_focals = con.execute("""
+        SELECT case_id, focal_id, count(*)
         FROM read_parquet(?)
-        GROUP BY case_candidate_id
+        GROUP BY case_id, focal_id
         HAVING count(*) > 1
-        ORDER BY case_candidate_id
+        ORDER BY case_id, focal_id
         LIMIT 10
-    """, [str(cases_path)]).fetchall()
-    if duplicate_cases:
-        raise ValueError(f"duplicate case_candidate_id rows: {duplicate_cases}")
+    """, [str(case_focals)]).fetchall()
+    if duplicate_focals:
+        raise ValueError(f"duplicate case_id/focal_id rows: {duplicate_focals}")
 
+    focals = sql_literal(str(case_focals))
     cases = sql_literal(str(cases_path))
     timeline = sql_literal(str(timeline_path))
 
     missing_focal = con.execute(f"""
-        SELECT c.case_candidate_id,
-               c.market_id,
-               c.focal_product_id
-        FROM read_parquet({cases}) c
+        SELECT f.case_id, f.focal_id, f.focal_product_id
+        FROM read_parquet({focals}) f
+        JOIN read_parquet({cases}) c USING(case_id)
         LEFT JOIN read_parquet({timeline}) t
           ON c.source_partition = t.source_partition
          AND c.market_id = t.market_id
-         AND c.focal_product_id = t.product_id
+         AND f.focal_product_id = t.product_id
         WHERE t.product_id IS NULL
-        ORDER BY c.case_candidate_id
+        ORDER BY f.case_id, f.focal_id
         LIMIT 10
     """).fetchall()
     if missing_focal:
@@ -131,79 +129,44 @@ def write_shelf_members(
         )
 
     copy_atomic(f"""
-        WITH focal AS (
-            SELECT c.case_candidate_id,
-                   c.source_partition,
-                   c.discovery_version,
-                   c.market_id,
-                   c.market_label,
-                   c.focal_product_id,
-                   c.t0,
-                   t.product_id,
-                   t.product_title,
-                   'focal'::VARCHAR AS role,
-                   t.first_rating_date,
-                   t.last_rating_date,
-                   t.metadata_snapshot_price
-            FROM read_parquet({cases}) c
-            JOIN read_parquet({timeline}) t
-              ON c.source_partition = t.source_partition
-             AND c.market_id = t.market_id
-             AND c.focal_product_id = t.product_id
-        ), competitors AS (
-            SELECT c.case_candidate_id,
-                   c.source_partition,
-                   c.discovery_version,
-                   c.market_id,
-                   c.market_label,
-                   c.focal_product_id,
-                   c.t0,
-                   t.product_id,
-                   t.product_title,
-                   'competitor'::VARCHAR AS role,
-                   t.first_rating_date,
-                   t.last_rating_date,
-                   t.metadata_snapshot_price
-            FROM read_parquet({cases}) c
-            JOIN read_parquet({timeline}) t
-              ON c.source_partition = t.source_partition
-             AND c.market_id = t.market_id
-            WHERE t.product_id <> c.focal_product_id
-              AND t.first_rating_date < c.t0
-              AND t.last_rating_date >= c.t0
-        )
-        SELECT * FROM focal
-        UNION ALL
-        SELECT * FROM competitors
+        SELECT f.case_id,
+               f.focal_id,
+               f.focal_product_id,
+               f.t0 AS focal_t0,
+               c.source_partition,
+               c.market_id,
+               c.market_label,
+               t.product_id AS competitor_product_id,
+               t.product_title AS competitor_product_title,
+               t.first_rating_date,
+               t.last_rating_date,
+               t.metadata_snapshot_price
+        FROM read_parquet({focals}) f
+        JOIN read_parquet({cases}) c USING(case_id)
+        JOIN read_parquet({timeline}) t
+          ON c.source_partition = t.source_partition
+         AND c.market_id = t.market_id
+        WHERE t.product_id <> f.focal_product_id
+          AND t.first_rating_date < f.t0
+          AND t.last_rating_date >= f.t0
     """, destination)
 
-    bad_focal_count = con.execute("""
-        SELECT case_candidate_id,
-               count(*) FILTER (role='focal') AS n_focal
-        FROM read_parquet(?)
-        GROUP BY case_candidate_id
-        HAVING count(*) FILTER (role='focal') <> 1
-        ORDER BY case_candidate_id
-        LIMIT 10
-    """, [str(destination)]).fetchall()
-    if bad_focal_count:
-        raise ValueError(
-            f"each case must have exactly one focal shelf row: {bad_focal_count}"
-        )
 
-
-def attach_shelf_features(
+def write_focal_competitors(
     con: duckdb.DuckDBPyConnection,
-    members_path: Path,
+    candidate_path: Path,
     cumulative_path: Path,
     destination: Path,
     copy_atomic,
     *,
     recent_window_days: int,
+    max_competitors: int,
 ) -> None:
     if recent_window_days <= 0:
         raise ValueError("recent_window_days must be positive")
-    members = sql_literal(str(members_path))
+    if max_competitors <= 0:
+        raise ValueError("max_competitors must be positive")
+    members = sql_literal(str(candidate_path))
     cumulative = sql_literal(str(cumulative_path))
     copy_atomic(f"""
         WITH pre_t0 AS (
@@ -214,8 +177,8 @@ def attach_shelf_features(
             FROM read_parquet({members}) s
             ASOF LEFT JOIN read_parquet({cumulative}) c
               ON s.source_partition = c.source_partition
-             AND s.product_id = c.product_id
-             AND c.event_date < s.t0
+             AND s.competitor_product_id = c.product_id
+             AND c.event_date < s.focal_t0
         ), before_recent_window AS (
             SELECT p.*,
                    coalesce(c.cumulative_rating_count, 0)::BIGINT
@@ -223,34 +186,108 @@ def attach_shelf_features(
             FROM pre_t0 p
             ASOF LEFT JOIN read_parquet({cumulative}) c
               ON p.source_partition = c.source_partition
-             AND p.product_id = c.product_id
+             AND p.competitor_product_id = c.product_id
              AND c.event_date < CAST(
-                 p.t0 - INTERVAL {int(recent_window_days)} DAY AS DATE
+                 p.focal_t0 - INTERVAL {int(recent_window_days)} DAY AS DATE
              )
+        ), featured AS (
+            SELECT *,
+                   CASE
+                       WHEN pre_t0_review_count > 0 AND pre_t0_rating_sum IS NOT NULL
+                       THEN pre_t0_rating_sum / pre_t0_review_count
+                   END AS pre_t0_rating_mean,
+                   (pre_t0_review_count - review_count_before_recent_window)::BIGINT
+                       AS pre_t0_recent_review_count
+            FROM before_recent_window
+        ), ranked AS (
+            SELECT *,
+                   count(*) OVER (PARTITION BY case_id, focal_id)::BIGINT
+                       AS candidate_competitor_count,
+                   row_number() OVER (
+                       PARTITION BY case_id, focal_id
+                       ORDER BY pre_t0_recent_review_count DESC,
+                                pre_t0_review_count DESC,
+                                competitor_product_id
+                   )::BIGINT AS competitor_selection_rank
+            FROM featured
         )
-        SELECT case_candidate_id,
-               source_partition,
-               discovery_version,
-               market_id,
-               market_label,
+        SELECT case_id,
+               focal_id,
                focal_product_id,
-               t0,
-               product_id,
-               product_title,
-               role,
-               first_rating_date AS first_review_date,
-               last_rating_date AS last_review_date,
+               focal_t0,
+               competitor_product_id,
+               competitor_product_title,
+               candidate_competitor_count,
                pre_t0_review_count,
+               pre_t0_recent_review_count,
+               pre_t0_rating_mean,
+               competitor_selection_rank,
+               (competitor_selection_rank <= {int(max_competitors)}) AS competitor_selected,
                CASE
-                   WHEN pre_t0_review_count > 0
-                    AND pre_t0_rating_sum IS NOT NULL
-                   THEN pre_t0_rating_sum / pre_t0_review_count
-               END AS pre_t0_rating_mean,
-               {int(recent_window_days)}::BIGINT AS recent_window_days,
-               (pre_t0_review_count - review_count_before_recent_window)::BIGINT
-                   AS pre_t0_recent_review_count,
-               NULL::DOUBLE AS price_at_t0,
-               NULL::VARCHAR AS price_source,
-               metadata_snapshot_price
-        FROM before_recent_window
+                   WHEN candidate_competitor_count <= {int(max_competitors)}
+                   THEN 'all_kept_pool_le_16'
+                   ELSE 'ranked_top16'
+               END AS competitor_selection_reason,
+               first_rating_date,
+               last_rating_date,
+               metadata_snapshot_price,
+               source_partition,
+               market_id,
+               market_label
+        FROM ranked
+        ORDER BY case_id, focal_id, competitor_selection_rank
+    """, destination)
+
+
+def write_case_shelf(
+    con: duckdb.DuckDBPyConnection,
+    cases_path: Path,
+    case_focals: Path,
+    selected_competitors: Path,
+    timeline_path: Path,
+    destination: Path,
+    copy_atomic,
+) -> None:
+    cases = sql_literal(str(cases_path))
+    focals = sql_literal(str(case_focals))
+    comps = sql_literal(str(selected_competitors))
+    timeline = sql_literal(str(timeline_path))
+    copy_atomic(f"""
+        WITH focal_rows AS (
+            SELECT f.case_id, c.source_partition, c.market_id, f.focal_product_id AS product_id,
+                   TRUE AS is_focal, FALSE AS is_competitor
+            FROM read_parquet({focals}) f
+            JOIN read_parquet({cases}) c USING(case_id)
+        ), competitor_rows AS (
+            SELECT case_id, source_partition, market_id, competitor_product_id AS product_id,
+                   FALSE AS is_focal, TRUE AS is_competitor
+            FROM read_parquet({comps})
+            WHERE competitor_selected
+        ), unioned AS (
+            SELECT case_id, source_partition, market_id, product_id,
+                   max(is_focal) AS is_focal,
+                   max(is_competitor) AS is_competitor
+            FROM (
+                SELECT * FROM focal_rows
+                UNION ALL
+                SELECT * FROM competitor_rows
+            )
+            GROUP BY case_id, source_partition, market_id, product_id
+        )
+        SELECT u.case_id,
+               u.source_partition,
+               u.market_id,
+               u.product_id,
+               t.product_title,
+               u.is_focal,
+               u.is_competitor,
+               t.first_rating_date AS first_review_date,
+               t.last_rating_date AS last_review_date,
+               t.metadata_snapshot_price
+        FROM unioned u
+        JOIN read_parquet({timeline}) t
+          ON u.source_partition=t.source_partition
+         AND u.market_id=t.market_id
+         AND u.product_id=t.product_id
+        ORDER BY u.case_id, u.product_id
     """, destination)

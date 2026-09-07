@@ -21,11 +21,9 @@ def _first(columns: set[str], candidates: tuple[str, ...]) -> str | None:
 
 
 class PopulationScanner:
-    """对一个大类的用户事件做 case-agnostic 基础人口扫描。
+    """对一个大类的用户评论做 case-agnostic 基础人口扫描。
 
-    支持两类已经存在的输入：
-    1. Amazon rating_only / canonical CSV、Parquet；
-    2. AmazonReviewrepo v5 的 rating_event_store 目录。
+    默认输入是 Amazon full review JSONL。空文本评论仍计一条历史。
     """
 
     def __init__(
@@ -34,13 +32,18 @@ class PopulationScanner:
         output_dir: Path,
         *,
         source_partition: str | None = None,
+        min_history: int = 2,
     ) -> None:
         self.events = events.expanduser().resolve()
         self.output_dir = output_dir.expanduser().resolve()
         self.source_partition = source_partition
+        if min_history < 1:
+            raise ValueError("min_history must be >= 1")
+        self.min_history = min_history
         if not self.events.exists():
             raise FileNotFoundError(self.events)
         self.users_path = self.output_dir / "users.parquet"
+        self.events_path = self.output_dir / "review_events.parquet"
         self.summary_path = self.output_dir / "summary.json"
         self.con = duckdb.connect()
         self.con.execute("SET preserve_insertion_order=false")
@@ -81,6 +84,12 @@ class PopulationScanner:
         suffix = self.events.suffix.lower()
         if suffix == ".parquet":
             return f"read_parquet({sql_literal(str(self.events))})", "parquet"
+        if suffix == ".jsonl":
+            return (
+                f"read_json({sql_literal(str(self.events))}, format='newline_delimited', "
+                "ignore_errors=true, maximum_object_size=134217728)",
+                "jsonl_reviews",
+            )
         if suffix in {".csv", ".tsv"}:
             delim = "'\\t'" if suffix == ".tsv" else "','"
             return (
@@ -99,6 +108,8 @@ class PopulationScanner:
         product_col = _first(columns, PRODUCT_COLUMNS)
         time_col = _first(columns, TIME_COLUMNS)
         verified_col = _first(columns, VERIFIED_COLUMNS)
+        rating_col = _first(columns, RATING_COLUMNS)
+        text_col = _first(columns, ("text", "review_text"))
         if not user_col or not product_col or not time_col:
             raise ValueError(
                 "event source must provide user/product/time columns; "
@@ -132,6 +143,10 @@ class PopulationScanner:
         verified_expr = (
             f"try_cast({verified_col} AS BOOLEAN)" if verified_col else "NULL::BOOLEAN"
         )
+        text_expr = (
+            f"CAST({text_col} AS VARCHAR)" if text_col else "NULL::VARCHAR"
+        )
+        rating_expr = f"try_cast({rating_col} AS DOUBLE)" if rating_col else "NULL::DOUBLE"
         self.con.execute(f"""
             CREATE OR REPLACE TEMP VIEW population_events AS
             SELECT {partition_expr} AS source_partition,
@@ -139,7 +154,9 @@ class PopulationScanner:
                    CAST({product_col} AS VARCHAR) AS product_id,
                    {ts_expr} AS event_timestamp,
                    CAST({ts_expr} AS DATE) AS event_date,
-                   {verified_expr} AS verified_purchase
+                   {rating_expr} AS rating,
+                   {verified_expr} AS verified_purchase,
+                   {text_expr} AS review_text
             FROM {relation}
             WHERE {user_col} IS NOT NULL
               AND trim(CAST({user_col} AS VARCHAR)) <> ''
@@ -154,12 +171,28 @@ class PopulationScanner:
             "resolved_product_column": product_col,
             "resolved_time_column": time_col,
             "resolved_verified_column": verified_col,
+            "resolved_rating_column": rating_col,
+            "resolved_text_column": text_col,
+            "empty_review_text_kept": True,
+            "review_text_persisted": False,
         }
 
     def run(self) -> dict[str, Any]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         source_meta = self._register_events()
         self._copy_atomic("""
+            SELECT source_partition,
+                   user_id,
+                   product_id,
+                   event_timestamp,
+                   event_date,
+                   rating,
+                   verified_purchase,
+                   (review_text IS NOT NULL AND trim(review_text) <> '') AS has_review_text
+            FROM population_events
+            ORDER BY source_partition, user_id, event_timestamp, product_id
+        """, self.events_path)
+        self._copy_atomic(f"""
             SELECT source_partition,
                    user_id,
                    count(*)::BIGINT AS n_events,
@@ -171,11 +204,19 @@ class PopulationScanner:
                    max(event_date) AS last_event_date
             FROM population_events
             GROUP BY source_partition, user_id
+            HAVING count(*) >= {int(self.min_history)}
             ORDER BY source_partition, user_id
         """, self.users_path)
 
         event_count = int(self.con.execute(
             "SELECT count(*) FROM population_events"
+        ).fetchone()[0])
+        empty_text_count = int(self.con.execute("""
+            SELECT count(*) FROM population_events
+            WHERE review_text IS NULL OR trim(review_text) = ''
+        """).fetchone()[0])
+        raw_user_count = int(self.con.execute(
+            "SELECT count(DISTINCT user_id) FROM population_events"
         ).fetchone()[0])
         user_count = int(self.con.execute(
             "SELECT count(*) FROM read_parquet(?)", [str(self.users_path)]
@@ -184,28 +225,38 @@ class PopulationScanner:
             "SELECT count(DISTINCT source_partition) FROM read_parquet(?)",
             [str(self.users_path)],
         ).fetchone()[0])
-        stats = self.con.execute("""
-            SELECT avg(n_events)::DOUBLE,
-                   quantile_cont(n_events, 0.5)::DOUBLE,
-                   quantile_cont(n_events, 0.9)::DOUBLE,
-                   quantile_cont(n_events, 0.99)::DOUBLE,
-                   avg(n_products)::DOUBLE,
-                   quantile_cont(n_products, 0.5)::DOUBLE,
-                   quantile_cont(n_products, 0.9)::DOUBLE,
-                   quantile_cont(n_products, 0.99)::DOUBLE,
-                   avg(CASE WHEN n_events=1 THEN 1.0 ELSE 0.0 END)::DOUBLE
-            FROM read_parquet(?)
-        """, [str(self.users_path)]).fetchone()
+        if user_count == 0:
+            stats = (None, None, None, None, None, None, None, None, None)
+        else:
+            stats = self.con.execute("""
+                SELECT avg(n_events)::DOUBLE,
+                       quantile_cont(n_events, 0.5)::DOUBLE,
+                       quantile_cont(n_events, 0.9)::DOUBLE,
+                       quantile_cont(n_events, 0.99)::DOUBLE,
+                       avg(n_products)::DOUBLE,
+                       quantile_cont(n_products, 0.5)::DOUBLE,
+                       quantile_cont(n_products, 0.9)::DOUBLE,
+                       quantile_cont(n_products, 0.99)::DOUBLE,
+                       avg(CASE WHEN n_events=1 THEN 1.0 ELSE 0.0 END)::DOUBLE
+                FROM read_parquet(?)
+            """, [str(self.users_path)]).fetchone()
         summary = {
             "status": "COMPLETE",
             "schema_version": "population_scan_v1",
             "source": str(self.events),
+            "review_events": str(self.events_path),
             "requested_source_partition": self.source_partition,
             "source_metadata": source_meta,
             "event_count": event_count,
+            "empty_review_text_count": empty_text_count,
+            "raw_user_count": raw_user_count,
             "user_count": user_count,
+            "min_history": self.min_history,
+            "min_history_unit": "n_reviews",
             "partition_count": partition_count,
-            "event_count_policy": "every observed rating/review event counts once",
+            "event_count_policy": (
+                "every full-review JSONL row counts once, including empty text"
+            ),
             "product_count_policy": "distinct product_id per user",
             "verified_purchase_policy": "separate count when available; never substitutes n_events",
             "stats": {

@@ -33,22 +33,24 @@ def write_positive_user_outcomes(
         WITH ranked AS (
             SELECT *,
                    row_number() OVER (
-                       PARTITION BY case_candidate_id, user_id
+                       PARTITION BY case_id, focal_id, user_id
                        ORDER BY event_timestamp, product_id
                    ) AS outcome_rank
             FROM read_parquet({src})
         )
-        SELECT case_candidate_id,
+        SELECT case_id,
+               focal_id,
                market_id,
                source_partition,
+               t0,
                user_id,
                product_id AS outcome_product_id,
-               product_role AS outcome_product_role,
+               is_focal AS outcome_is_focal,
                event_timestamp,
                rating,
                verified_purchase,
                {sql_literal(outcome_policy)}::VARCHAR AS outcome_policy
         FROM ranked
         WHERE outcome_rank=1
-        ORDER BY case_candidate_id, user_id
+        ORDER BY case_id, focal_id, user_id
     """, destination)

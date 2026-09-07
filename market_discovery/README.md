@@ -113,6 +113,7 @@ Cross-path merge **不调用 LLM**，也不做：
 
 - `first_market.*`：每个 path 的 local markets；
 - `final_market.*`：完成安全同名/格式归一合并后的最终 Market，供后续 Case 构造使用；
+- 合并后 `product_count < 9`（即商品数 ≤8）的 Market 不写入 `final_market`，只记在 `dropped_small_markets.json`；
 - `cross_path_exact_merge_audit.json`：实际发生了哪些合并。
 
 ## 4. 运行

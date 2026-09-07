@@ -73,6 +73,7 @@ def test_fixture_discovery_materializes_final_market(tmp_path: Path) -> None:
         output_root=tmp_path / "out",
         discovery_version="test_v1",
         source_partition="Electronics",
+        min_final_market_product_count=1,
     )
     try:
         summary = pipeline.prepare_local_evidence()

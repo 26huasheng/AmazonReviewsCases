@@ -7,6 +7,8 @@
 1. `population_source` 最终采用 `category`、`global`，还是分别做两套 benchmark 设置。
 2. 每个 Market shared population 的目标规模 `population_size`。
 3. 是否对极大 / 极小 Market 使用不同 population size，还是全 benchmark 固定规模。
+4. 当前实现已丢弃 `product_count < 9` 的 Market；若以后改门槛，改 `MIN_FINAL_MARKET_PRODUCT_COUNT`。
+5. behavior graph 阈值（100 / 5 / 6）沿用 Electronics 预实验，尚未作为论文最终口径冻结。
 
 ## 数据接口待补
 

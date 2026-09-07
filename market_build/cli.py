@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from market_discovery.cross_path_merge import MIN_FINAL_MARKET_PRODUCT_COUNT
 from .pipeline import MarketBuildPipeline
 
 
@@ -20,11 +21,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--population-size", type=int)
     parser.add_argument("--population-seed", default="market_population_v1")
     parser.add_argument("--user-bucket-count", type=int, default=256)
+    parser.add_argument(
+        "--min-market-products",
+        type=int,
+        default=MIN_FINAL_MARKET_PRODUCT_COUNT,
+        help=(
+            "Ignore final markets smaller than this "
+            f"(default: {MIN_FINAL_MARKET_PRODUCT_COUNT})"
+        ),
+    )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.min_market_products < 0:
+        raise SystemExit("--min-market-products must be >= 0")
     worker = MarketBuildPipeline(
         args.final_market,
         args.product_core,
@@ -37,6 +49,7 @@ def main() -> None:
         population_size=args.population_size,
         population_seed=args.population_seed,
         user_bucket_count=args.user_bucket_count,
+        min_product_count=args.min_market_products,
     )
     try:
         result = worker.run()

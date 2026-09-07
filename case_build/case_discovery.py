@@ -101,16 +101,8 @@ def write_case_candidates(
     end = sql_literal(observation_end.isoformat())
     copy_atomic(f"""
         SELECT
-            'case_candidate_' || substr(
-                sha256(CAST(to_json(list_value(
-                    source_partition,
-                    market_id,
-                    product_id,
-                    CAST(entry_date AS VARCHAR)
-                )) AS VARCHAR)),
-                1,
-                20
-            ) AS case_candidate_id,
+            case_candidate_id,
+            case_candidate_id AS focal_candidate_id,
             source_partition,
             discovery_version,
             market_id,
@@ -141,5 +133,19 @@ def write_case_candidates(
                     THEN 'incomplete_evaluation_window'
                 ELSE NULL
             END AS structural_exclusion_reason
-        FROM timeline_with_active_competitor_count
+        FROM (
+            SELECT
+                'case_candidate_' || substr(
+                    sha256(CAST(to_json(list_value(
+                        source_partition,
+                        market_id,
+                        product_id,
+                        CAST(entry_date AS VARCHAR)
+                    )) AS VARCHAR)),
+                    1,
+                    20
+                ) AS case_candidate_id,
+                *
+            FROM timeline_with_active_competitor_count
+        ) timeline_candidates
     """, destination)

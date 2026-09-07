@@ -6,7 +6,10 @@ import argparse
 import json
 from pathlib import Path
 
-from .cross_path_merge import merge_exact_normalized_markets
+from .cross_path_merge import (
+    MIN_FINAL_MARKET_PRODUCT_COUNT,
+    merge_exact_normalized_markets,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,12 +25,26 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Directory containing first_market.csv",
     )
+    parser.add_argument(
+        "--min-market-products",
+        type=int,
+        default=MIN_FINAL_MARKET_PRODUCT_COUNT,
+        help=(
+            "Drop merged markets with fewer products than this from final_market "
+            f"(default: {MIN_FINAL_MARKET_PRODUCT_COUNT})"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    summary = merge_exact_normalized_markets(args.discovery_dir)
+    if args.min_market_products < 0:
+        raise SystemExit("--min-market-products must be >= 0")
+    summary = merge_exact_normalized_markets(
+        args.discovery_dir,
+        min_product_count=args.min_market_products,
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

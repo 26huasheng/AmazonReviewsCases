@@ -16,16 +16,21 @@ from .case_features import (
     attach_market_pre_t0_review_count,
     write_market_review_cumulative,
 )
-from .config import DEFAULT_EVALUATION_DAYS, DEFAULT_RECENT_ACTIVITY_WINDOW_DAYS
+from .config import (
+    DEFAULT_EVALUATION_DAYS,
+    DEFAULT_RECENT_ACTIVITY_WINDOW_DAYS,
+    MAX_COMPETITORS_PER_FOCAL,
+)
 from .market_timeline import write_market_product_map_and_timeline
 from .product_timeline import (
     validate_product_time_summary,
     write_product_time_summary_from_daily,
 )
 from .shelf import (
-    attach_shelf_features,
+    write_case_shelf,
+    write_focal_competitor_candidates,
+    write_focal_competitors,
     write_product_rating_cumulative,
-    write_shelf_members,
 )
 from .time_windows import (
     TimeBox,
@@ -56,9 +61,11 @@ class _DuckDBStage:
 def _configure_connection(con: duckdb.DuckDBPyConnection, output_dir: Path) -> None:
     con.execute("SET threads=4")
     con.execute("SET preserve_insertion_order=false")
+    con.execute("SET memory_limit='200GB'")
     temp_dir = output_dir / ".duckdb_tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     con.execute(f"SET temp_directory={sql_literal(str(temp_dir))}")
+    con.execute("SET max_temp_directory_size='80GiB'")
 
 
 class CaseDiscoveryPipeline(_DuckDBStage):
@@ -247,37 +254,41 @@ class CaseDiscoveryPipeline(_DuckDBStage):
             "market_pre_t0_review_count_status": market_pre_t0_status,
             "time_boxes": time_boxes_identity(self.time_boxes),
             "hard_quality_gates_applied": False,
+            "evaluable_is_formal_case": False,
         }
         write_json(self.summary_path, payload)
         return payload
 
 
 class CaseShelfBuilder(_DuckDBStage):
-    """给已经选定的一批 Case 物化 t0 shelf 和 pre-t0 商品特征。
-
-    cases_path 是显式输入，避免把一个超大 Market 的所有候选 focal 一次性做
-    case × product 展开。正式大规模运行时应先筛出准备继续处理的 Case，再调用本阶段。
-    """
+    """每个 focal 找 competitor（最多16），再 union 成 Case shelf。"""
 
     def __init__(
         self,
         cases_path: Path,
+        case_focals: Path,
         market_timeline: Path,
         rating_daily_summary: Path,
         output_dir: Path,
         *,
         recent_window_days: int = DEFAULT_RECENT_ACTIVITY_WINDOW_DAYS,
+        max_competitors_per_focal: int = MAX_COMPETITORS_PER_FOCAL,
     ) -> None:
         self.cases_path = cases_path.expanduser().resolve()
+        self.case_focals = case_focals.expanduser().resolve()
         self.market_timeline = market_timeline.expanduser().resolve()
         self.rating_daily_summary = rating_daily_summary.expanduser().resolve()
         self.output_dir = output_dir.expanduser().resolve()
         if recent_window_days <= 0:
             raise ValueError("recent_window_days must be positive")
+        if max_competitors_per_focal <= 0:
+            raise ValueError("max_competitors_per_focal must be positive")
         self.recent_window_days = recent_window_days
+        self.max_competitors_per_focal = max_competitors_per_focal
 
         for path in (
             self.cases_path,
+            self.case_focals,
             self.market_timeline,
             self.rating_daily_summary,
         ):
@@ -286,7 +297,9 @@ class CaseShelfBuilder(_DuckDBStage):
 
         self.work_dir = self.output_dir / "_work"
         self.cumulative_path = self.work_dir / "product_rating_cumulative.parquet"
-        self.members_path = self.work_dir / "shelf_members.parquet"
+        self.candidate_path = self.work_dir / "focal_competitor_candidates.parquet"
+        self.focal_competitors_work_path = self.work_dir / "focal_competitors.parquet"
+        self.focal_competitors_path = self.output_dir / "focal_competitors.parquet"
         self.shelf_path = self.output_dir / "case_shelf.parquet"
         self.summary_path = self.output_dir / "case_shelf_summary.json"
 
@@ -303,27 +316,42 @@ class CaseShelfBuilder(_DuckDBStage):
             self.cumulative_path,
             self._copy_atomic,
         )
-        write_shelf_members(
+        write_focal_competitor_candidates(
             self.con,
+            self.case_focals,
             self.cases_path,
             self.market_timeline,
-            self.members_path,
+            self.candidate_path,
             self._copy_atomic,
         )
-        attach_shelf_features(
+        write_focal_competitors(
             self.con,
-            self.members_path,
+            self.candidate_path,
             self.cumulative_path,
-            self.shelf_path,
+            self.focal_competitors_work_path,
             self._copy_atomic,
             recent_window_days=self.recent_window_days,
+            max_competitors=self.max_competitors_per_focal,
+        )
+        self._copy_atomic(
+            f"SELECT * FROM read_parquet({sql_literal(str(self.focal_competitors_work_path))})",
+            self.focal_competitors_path,
+        )
+        write_case_shelf(
+            self.con,
+            self.cases_path,
+            self.case_focals,
+            self.focal_competitors_path,
+            self.market_timeline,
+            self.shelf_path,
+            self._copy_atomic,
         )
 
         input_case_count = int(self.con.execute(
             "SELECT count(*) FROM read_parquet(?)", [str(self.cases_path)]
         ).fetchone()[0])
         case_count = int(self.con.execute(
-            "SELECT count(DISTINCT case_candidate_id) FROM read_parquet(?)",
+            "SELECT count(DISTINCT case_id) FROM read_parquet(?)",
             [str(self.shelf_path)],
         ).fetchone()[0])
         if case_count != input_case_count:
@@ -336,22 +364,24 @@ class CaseShelfBuilder(_DuckDBStage):
         max_shelf = int(self.con.execute("""
             SELECT coalesce(max(n), 0)
             FROM (
-                SELECT case_candidate_id, count(*) AS n
+                SELECT case_id, count(*) AS n
                 FROM read_parquet(?)
-                GROUP BY case_candidate_id
+                GROUP BY case_id
             )
         """, [str(self.shelf_path)]).fetchone()[0])
 
         payload = {
             "status": "COMPLETE",
-            "schema_version": "case_shelf_v1",
+            "schema_version": "case_shelf_v2",
             "case_count": case_count,
             "shelf_row_count": shelf_row_count,
             "max_shelf_products_per_case": max_shelf,
             "recent_activity_window_days": self.recent_window_days,
+            "max_competitors_per_focal": self.max_competitors_per_focal,
             "shelf_truncation_applied": False,
             "activity_threshold_applied": False,
             "price_at_t0_status": "NOT_YET_AVAILABLE",
+            "focal_competitors": str(self.focal_competitors_path),
         }
         write_json(self.summary_path, payload)
         return payload

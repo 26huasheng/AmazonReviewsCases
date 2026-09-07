@@ -1,11 +1,14 @@
 # Case population TODO
 
-## 需要真实分布后冻结
+## 已冻结
 
-1. `min_history_products` 最终阈值。
-2. `max_days_since_last_event` 最终阈值。
-3. 每个 Case 的目标用户数。
-4. category / market relation 是否只做分层抽样，还是有部分成为硬资格。
+```text
+min_history_products = 3
+max_days_since_last_event = 365
+min_category_products = None
+min_market_products = None
+target_users_per_case = 1000
+```
 
 ## 分层抽样
 
@@ -26,4 +29,4 @@ market_history / category_only / outside_category
 
 - 禁止根据 evaluation window 是否有正例来筛用户；
 - 禁止为了提高 GT1 数量而删除 `none` 用户；
-- 所有 eligibility 特征必须只使用 `t0` 前数据。
+- 所有 eligibility 特征必须只使用 population_cutoff 前数据。

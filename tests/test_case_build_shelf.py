@@ -28,16 +28,27 @@ def _copy_rows(path: Path, ddl: str, rows: list[tuple]) -> None:
 
 def _write_cases(path: Path) -> None:
     _copy_rows(path, """(
-        case_candidate_id VARCHAR,
+        case_id VARCHAR,
         source_partition VARCHAR,
-        discovery_version VARCHAR,
         market_id VARCHAR,
         market_label VARCHAR,
+        time_box_id VARCHAR,
+        n_focals BIGINT
+    )""", [
+        ("C1", PARTITION, MARKET, "dog_collar", "2022-H1", 1),
+        ("C2", PARTITION, MARKET, "dog_collar", "2022-H2", 1),
+    ])
+
+
+def _write_focals(path: Path) -> None:
+    _copy_rows(path, """(
+        case_id VARCHAR,
+        focal_id VARCHAR,
         focal_product_id VARCHAR,
         t0 DATE
     )""", [
-        ("C1", PARTITION, VERSION, MARKET, "dog_collar", "X", date(2022, 1, 1)),
-        ("C2", PARTITION, VERSION, MARKET, "dog_collar", "Y", date(2022, 7, 1)),
+        ("C1", "F1", "X", date(2022, 1, 1)),
+        ("C2", "F2", "Y", date(2022, 7, 1)),
     ])
 
 
@@ -76,9 +87,11 @@ def _write_timeline(path: Path) -> None:
 
 def test_shelf_time_boundaries_and_pre_t0_features(tmp_path: Path) -> None:
     cases = tmp_path / "cases.parquet"
+    focals = tmp_path / "case_focals.parquet"
     timeline = tmp_path / "timeline.parquet"
     daily = tmp_path / "daily.parquet"
     _write_cases(cases)
+    _write_focals(focals)
     _write_timeline(timeline)
 
     t0 = date(2022, 1, 1)
@@ -105,7 +118,7 @@ def test_shelf_time_boundaries_and_pre_t0_features(tmp_path: Path) -> None:
     ])
 
     out = tmp_path / "out"
-    builder = CaseShelfBuilder(cases, timeline, daily, out)
+    builder = CaseShelfBuilder(cases, focals, timeline, daily, out)
     try:
         summary = builder.run()
     finally:
@@ -117,60 +130,70 @@ def test_shelf_time_boundaries_and_pre_t0_features(tmp_path: Path) -> None:
     con = duckdb.connect()
     try:
         c1 = con.execute("""
-            SELECT product_id, role,
+            SELECT product_id, is_focal, is_competitor, metadata_snapshot_price
+            FROM read_parquet(?)
+            WHERE case_id='C1'
+            ORDER BY product_id
+        """, [str(out / "case_shelf.parquet")]).fetchall()
+        feats = con.execute("""
+            SELECT competitor_product_id,
                    pre_t0_review_count,
                    pre_t0_recent_review_count,
                    pre_t0_rating_mean,
-                   price_at_t0,
-                   metadata_snapshot_price
+                   competitor_selected
             FROM read_parquet(?)
-            WHERE case_candidate_id='C1'
-            ORDER BY product_id
-        """, [str(out / "case_shelf.parquet")]).fetchall()
+            WHERE case_id='C1'
+            ORDER BY competitor_product_id
+        """, [str(out / "focal_competitors.parquet")]).fetchall()
         c2_ids = {
             row[0]
             for row in con.execute("""
                 SELECT product_id
                 FROM read_parquet(?)
-                WHERE case_candidate_id='C2'
+                WHERE case_id='C2'
             """, [str(out / "case_shelf.parquet")]).fetchall()
         }
     finally:
         con.close()
 
     by_id = {row[0]: row[1:] for row in c1}
+    feat = {row[0]: row[1:] for row in feats}
     # SAME 与 focal X 同日首评，所以 C1 不算既有 competitor。
     assert "SAME" not in by_id
     # EDGE 最后评论日正好等于 t0，仍算 t0 当日活跃。
     assert "EDGE" in by_id
     assert "GONE" not in by_id
-    assert by_id["X"][0] == "focal"
-    assert by_id["X"][1] == 0
+    assert by_id["X"][0] is True
+    assert by_id["X"][1] is False
     # A 的 t0 前窗口只有两笔各 5 条；t0 当天 100 条不应进入历史。
-    assert by_id["A"][1] == 10
-    assert by_id["A"][2] == 10
-    assert by_id["A"][3] == 4.5
-    # metadata snapshot price 只保留为 metadata，不冒充历史 t0 价格。
-    assert by_id["A"][4] is None
-    assert by_id["A"][5] == 10.0
+    assert feat["A"][0] == 10
+    assert feat["A"][1] == 10
+    assert feat["A"][2] == 4.5
+    assert by_id["A"][2] == 10.0
     # X 在较晚的 C2 中自然成为 competitor；SAME 也已经早于 C2。
     assert {"X", "SAME", "A", "Y"}.issubset(c2_ids)
 
 
-def test_shelf_has_no_legacy_150_cap(tmp_path: Path) -> None:
+def test_shelf_caps_competitors_at_16(tmp_path: Path) -> None:
     t0 = date(2022, 1, 1)
     cases = tmp_path / "cases.parquet"
+    focals = tmp_path / "case_focals.parquet"
     timeline = tmp_path / "timeline.parquet"
     daily = tmp_path / "daily.parquet"
     _copy_rows(cases, """(
-        case_candidate_id VARCHAR,
+        case_id VARCHAR,
         source_partition VARCHAR,
-        discovery_version VARCHAR,
         market_id VARCHAR,
         market_label VARCHAR,
+        time_box_id VARCHAR,
+        n_focals BIGINT
+    )""", [("C1", PARTITION, MARKET, "large_market", "2022-H1", 1)])
+    _copy_rows(focals, """(
+        case_id VARCHAR,
+        focal_id VARCHAR,
         focal_product_id VARCHAR,
         t0 DATE
-    )""", [("C1", PARTITION, VERSION, MARKET, "large_market", "F", t0)])
+    )""", [("C1", "F1", "F", t0)])
 
     competitors = [f"P{i:03d}" for i in range(151)]
     timeline_rows = [
@@ -211,10 +234,19 @@ def test_shelf_has_no_legacy_150_cap(tmp_path: Path) -> None:
     ] + [(PARTITION, "F", t0, 1, 5.0)])
 
     out = tmp_path / "out"
-    builder = CaseShelfBuilder(cases, timeline, daily, out)
+    builder = CaseShelfBuilder(cases, focals, timeline, daily, out)
     try:
         summary = builder.run()
     finally:
         builder.close()
 
-    assert summary["max_shelf_products_per_case"] == 152
+    assert summary["max_shelf_products_per_case"] == 17
+    con = duckdb.connect()
+    try:
+        selected = con.execute("""
+            SELECT count(*) FILTER (competitor_selected)
+            FROM read_parquet(?)
+        """, [str(out / "focal_competitors.parquet")]).fetchone()[0]
+    finally:
+        con.close()
+    assert selected == 16
