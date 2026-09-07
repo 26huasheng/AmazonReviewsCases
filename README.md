@@ -1,446 +1,323 @@
 # AmazonReviewsCases
 
-Amazon Reviews 2023 上的 SEMS benchmark 构造与评测仓库。
+Amazon Reviews 2023 上的 **SEMS（Self-Evolving Market Simulation）benchmark 构造仓库**。
 
-核心层级固定为 **Market → Cases**。本仓负责从 Amazon Reviews / `AmazonReviewrepo@v5` 已有基础表继续构造 Market、Case、用户、GT、质量筛选、split、最终 benchmark 文件以及数值评测入口；模拟器本体不放在这里。
+当前主线已经从“一个新品 = 一个 Case”改成：
 
-最终数据格式见 [`SCHEMA.md`](SCHEMA.md)，所有尚未冻结的研究口径总表见 [`TODO.md`](TODO.md)。
+```text
+Final Market × time_box = Case
+Case 内包含 1 个或少数几个 focal
+每个 focal 有自己的 t0、local shelf、90 天 evaluation window 和 GT1
+```
+
+仓库负责 Market 构造、Case 构造、focal / competitor 选择、GT1、Quality、最终 JSON/JSONL 打包等数据侧工作；模拟器本体不在这里。
+
+## Current Release
+
+当前公开数据版本：[`Electronics_v1_cases`](https://github.com/26huasheng/AmazonReviewsCases/releases/tag/Electronics_v1_cases)
+
+| 内容 | 数量 |
+|---|---:|
+| Final Markets with accepted Cases | **381** |
+| Accepted Cases | **2424** |
+| Accepted focals | **2493** |
+| GT1 choice rows | **301,037** |
+
+Release 文件：`Electronics_v1_cases.tar.gz`。
+
+该 release 只包含 Quality 后的正式 JSON/JSONL Case package，不包含生产过程中的大规模 Parquet 中间表。
 
 ---
 
-# 1. 核心结构
+# 1. 数据层级
 
 ```text
 MARKET
-├── 长期商品 universe
-├── shared population
-├── shared user history
-│
-└── CASES
-    ├── focal product
-    ├── t0
-    ├── evaluation window
-    ├── t0 shelf
-    ├── selected user ids
-    └── Ground Truth
-        ├── GT1: 已知发生市场内选择 -> product
-        └── GT2: 全部 Case 用户 -> product / none
-                                ↓
-                         demand / share / rank
+├── products/                 # Market 长期商品 universe
+├── users/                    # 当前 release 中实际 GT1 用户及 pre-t0 histories
+└── cases/
+    └── time_box/
+        └── case_id/
+            ├── Case metadata
+            ├── 1..N focals
+            ├── Case union shelf
+            ├── focal → competitor relations
+            └── GT1
 ```
 
-一个 Market 可以包含多个不同时间的新品进入 Case。Case 共享 Market 级商品和人口资产，不重复保存完整用户历史。
+Market 是长期竞争边界；Case 是这个 Market 在一个时间格子里的新品进入评测槽；真正的评测对象是 Case 里的 focal。
+
+一个 Case 可以有多个 focal，但每个 focal 始终单独拥有：
+
+```text
+t0 = first_rating_date
+evaluation window = [t0, t0 + 90 days)
+local shelf = focal + its selected competitors
+GT1 users / choices
+```
+
+`case_id` 由 `source_partition + market_id + time_box_id` 稳定生成，因此同一个 Market、同一个 time box 最多只有一个正式 Case。
 
 ---
 
-# 2. 完整流程
+# 2. Case 是怎么构造的
+
+## 2.1 Focal candidate discovery
+
+对 Final Market 内每个商品建立时间轴：
 
 ```text
-Amazon Reviews 2023
-        │
-        ▼
-     data_prep
-  全量下载 + 初筛表
-        │
-        ├──────────────────────────────┐
-        ▼                              ▼
-population_scan                  market_discovery
-大类用户基础扫描                   path-local Market 发现
-        │                              │
-        │                              ▼
-        │                    规范化后同名 cross-path merge
-        │                         （不调用 LLM）
-        └──────────────┬───────────────┘
-                       ▼
-                  Final Market
-                       │
-                       ▼
-                  market_build
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-   Market products  shared users  user history indexes
-                       │
-                       ▼
-                  case_build
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
- Case Discovery      t0 Shelf    Case Population
-          └────────────┬────────────┘
-                       ▼
-                  Ground Truth
-                   GT1 + GT2
-                       │
-             ┌─────────┴─────────┐
-             ▼                   ▼
-      external_signals      review activity truth
-       价格 / BSR 可选          可选辅助信号
-             └─────────┬─────────┘
-                       ▼
-                  Quality Gate
-                       │
-                       ▼
-                  Accepted Cases
-                       │
-                       ▼
-                benchmark_split
-                       │
-                       ▼
-                benchmark_export
-                       │
-                       ▼
-                  benchmark_data/
-                       │
-                       ▼
-                    evaluation
+t0 = first_rating_date
 ```
+
+只要 `t0` 有效且 90 天 evaluation window 完整，就先进入完整 focal candidate pool。
+
+Discovery 阶段不根据未来表现筛新品，不使用 `post90` 成功门槛，也不在这里决定最终 Case。
+
+## 2.2 Market × time_box 组成正式 Case
+
+默认时间格：
+
+- `1996` 单独一年；
+- `1997–2020` 主要按两年一格；
+- `2021–2023` 按半年一格；
+- 所有窗口均使用半开区间 `[start, end)`。
+
+Behavior graph 用于 focal diversity：
+
+```text
+有效行为团：component_size >= 6
+
+0 / 1 个有效行为团
+→ 该 Market × time_box 的全部 evaluable candidates 中稳定随机取 1 个 focal
+
+>= 2 个有效行为团
+→ 每个在当前 time_box 有 candidate 的有效行为团稳定随机取 1 个 focal
+```
+
+Behavior graph 不重新定义 Final Market，也不用于正式 competitor 排序。
 
 ---
 
-# 3. 模块状态
+# 3. Competitor / Shelf
 
-| 模块 | 主要职责 | 状态 |
-|---|---|---|
-| `data_prep/` | 全量下载 + Market Discovery 前基础表 | **已有代码** |
-| `population_scan/` | 大类级用户基础盘点 | **已有代码** |
-| `market_discovery/` | local Market Discovery + 安全 cross-path 同名合并 | **已有代码** |
-| `market_build/` | Market 商品、shared population、用户事件与累计历史 | **已有代码** |
-| `case_build/` | Case discovery、shelf、用户选择、GT、Quality Gate | **已有代码** |
-| `external_signals/` | 历史价格 / BSR 对齐 Case 的稳定接口 | **已有代码；provider 获取待接** |
-| `benchmark_split/` | learning / validation / evaluation 划分 | **已有代码** |
-| `benchmark_export/` | 跨表校验 + 最终 Market→Cases 物化 | **已有代码** |
-| `evaluation/` | GT1 / GT2 / 商品需求与排名评测 | **已有代码** |
+每个 focal 单独找自己的 competitor pool。
 
-这里的“已有代码”指主要数据接口与计算逻辑已经落仓。研究阈值、Keepa provider 请求和部分扩展指标仍按各目录 TODO 冻结。
+基础资格：
+
+```text
+同一个 Final Market
+product_id != focal_product_id
+first_rating_date < focal.t0
+last_rating_date >= focal.t0
+```
+
+也就是：新品进入 `t0` 时，该商品已经出现，并且仍处于 Amazon Reviews 的观测区间。
+
+每个 focal 最多保留 16 个 competitors：
+
+```text
+candidate competitors <= 16
+→ 全部保留
+
+candidate competitors > 16
+→ pre_t0_recent_review_count DESC
+→ pre_t0_review_count DESC
+→ product_id
+→ Top 16
+```
+
+其中 recent window 默认 120 天，只使用 `t0` 之前的数据。
+
+一个 Case 的 `shelf` 是所有 surviving focals 及其 competitors 的 `product_id` union，因此多 focal Case 的 union shelf 可以超过 17 个商品。
 
 ---
 
-# 4. Population
+# 4. GT1
 
-## `population_scan/`
+当前 Electronics v1 release 的正式 Ground Truth 是 **GT1：已知用户在局部货架上发生了真实可观测选择后，预测其选择哪个商品**。
 
-对一个大类或 v5 `rating_event_store` 扫描：
-
-```text
-source_partition
-user_id
-n_events
-n_products
-n_verified_purchases
-first_event_date
-last_event_date
-```
-
-它只做 case-agnostic 基础盘点，不按未来结果选用户。
-
-## `market_build/`
-
-把 Final Market 变成可被多个 Case 复用的资产：
+对每个 focal：
 
 ```text
-market_products.parquet
-market_population.parquet
-canonical_user_events.parquet
-user_event_store/
-user_history_cumulative.parquet
-user_category_history_cumulative.parquet
-user_market_history_cumulative.parquet
+local shelf = focal + selected competitors
+window = [t0, t0 + 90 days)
+
+完整 Amazon user events
+→ 找窗口内对 local shelf 任意商品有真实 rating/review event 的用户
+→ 每个用户取 first_observed_event
+→ 再检查该用户在 t0 前：
+   history_product_count >= 3
+   days_since_last_event <= 365
+→ GT1 users + choice truth
 ```
 
-Market population 支持 `category / global` 两种来源与确定性哈希抽样；最终策略和规模仍在 TODO 中冻结。
+GT1 **不经过预抽的 `case_users`**，也不设置最大人数截断；所有满足口径的真实用户都会保留。
 
-详细见：
+需要注意：Amazon Reviews 2023 提供的是 rating/review observation。这里的 GT1 是基于真实评分/评论行为构造的 **observed choice proxy**，不是完整购买日志。
 
-- [`population_scan/README.md`](population_scan/README.md)
-- [`market_build/README.md`](market_build/README.md)
+当前 release 不把实验性的 GT2 population/none 任务打包进正式 Case package。
 
 ---
 
-# 5. Market Discovery
+# 5. Quality Gate
 
-`market_discovery/` 的 path-local Discovery 主体迁自 `AmazonReviewrepo@v5`。
+Quality 先在 focal 层判断，再重建 Case。
 
-Cross-path 已改成固定窄规则：
-
-```text
-同一 source_partition
-+ market_label 安全规范化后完全相等
-→ 直接合并
-```
-
-例如：
+正式默认门槛：
 
 ```text
-Phone_Case
-phone-case
-phone case
+evaluation_window_complete = true
+selected_competitor_count ∈ [6, 16]
+GT1 users >= 20
+history_product_count >= 3
+days_since_last_event <= 365
 ```
 
-统一为 `phone_case`。
+并检查：
 
-Cross-path 不调用大模型，不做开放同义词发现、embedding merge 或 complete-link clustering。
+- focal 必须存在于 Case shelf；
+- competitor 不能指向 focal 自己，也不能重复；
+- competitor 数量与关系表一致；
+- competitor 必须满足 `first_rating_date < t0 <= last_rating_date`；
+- focal 的 local shelf 必须与 focal + selected competitors 一致；
+- `(case_id, focal_id, user_id)` 的 GT1 choice 唯一；
+- choice 必须属于该 focal 的 local shelf；
+- choice event 必须落在 `[t0, evaluation_end)`；
+- GT1 用户必须满足冻结的 history / recency 规则；
+- choice 必须可追溯到真实窗口事件。
 
-输出：
+多 focal Case 中，一个 focal 不合格只删除这个 focal。只要 Case 还剩至少 1 个 accepted focal，Case 就继续保留，并重新构建最终 `accepted_case_shelf`。
 
-```text
-final_market.parquet
-final_market.csv
-```
-
-详细见 [`market_discovery/README.md`](market_discovery/README.md)。
+未来新品是否成功不作为 Quality 门槛：focal 被选多少次、choice share、rank、post90 评论量等可以统计，但不会因为新品表现差而事后删除 Case。
 
 ---
 
-# 6. Case Build
+# 6. Electronics v1 Release 目录
 
-## 6.1 Case Discovery
-
-继续复用 v5 已验证的商品时间、区间累计与 ASOF 逻辑：
+Release 解压后按 **Market 名**组织：
 
 ```text
+Electronics_v1_cases/
+└── {market_name}/
+    ├── market.json
+    │
+    ├── users/
+    │   ├── users.jsonl
+    │   └── histories/
+    │       ├── summary.jsonl
+    │       └── events.jsonl
+    │
+    ├── products/
+    │   └── products.jsonl
+    │
+    └── cases/
+        └── {time_box_id}/          # 只创建实际有 accepted Case 的时间窗
+            └── {case_id}/
+                ├── case.json
+                ├── focals.jsonl
+                ├── shelf.jsonl
+                ├── focal_competitors.jsonl
+                └── ground_truth/
+                    ├── gt1_users.jsonl
+                    └── choice_truth.jsonl
+```
+
+### Market-level files
+
+`market.json`
+: Market 标识、名称、商品数、Case 数、focal 数、实际存在的 time boxes。
+
+`products/products.jsonl`
+: 该 Final Market 的长期商品 universe；来自现有 Market product asset，不重新抓取 metadata。
+
+`users/users.jsonl`
+: 该 Market 所有 accepted focals 的正式 GT1 用户去重集合。
+
+`users/histories/summary.jsonl`
+: `case_id + focal_id + user_id` 粒度的 pre-t0 历史摘要。
+
+`users/histories/events.jsonl`
+: 对应 focal `t0` 之前的真实用户事件，用于 agent history 初始化；不会包含 evaluation-window future events。
+
+### Case-level files
+
+`case.json`
+: `case_id`、Market、time box、population cutoff、focal 列表等 Case metadata。
+
+`focals.jsonl`
+: 一行一个 surviving focal，包含自己的 `t0`、90 天窗口、competitor 数、GT1 用户数等。
+
+`shelf.jsonl`
+: Quality 后的最终 Case union shelf。
+
+`focal_competitors.jsonl`
+: 每个 focal 与其 selected competitors 的显式关系，可恢复 focal-specific local shelf。
+
+`ground_truth/gt1_users.jsonl`
+: 每个 focal 的正式 GT1 用户。
+
+`ground_truth/choice_truth.jsonl`
+: 每个 `focal × user` 的 `first_observed_event` 真实 choice。
+
+正式 package 使用 JSON / JSONL；Parquet 只保留在生产层用于大规模计算。
+
+---
+
+# 7. Pipeline
+
+当前主要数据流：
+
+```text
+Amazon Reviews 2023 / AmazonReviewrepo@v5 assets
+        ↓
+market_discovery
+        ↓
 Final Market
-→ Market 商品时间轴
-→ 每个商品形成 candidate focal
-→ t0 = first_rating_date
-→ evaluation window
+        ↓
+market_build
+  ├── Market products
+  ├── canonical user events
+  ├── user history cumulative indexes
+  └── behavior components
+        ↓
+case_build discover
+        ↓
+focal candidate pool
+        ↓
+case_build select
+        ↓
+cases + case_focals
+        ↓
+case_build shelf
+        ↓
+focal_competitors + case_shelf
+        ↓
+GT1 construction
+        ↓
+Quality Gate
+        ↓
+accepted focals / cases / rebuilt shelf
+        ↓
+clean Market subset
+        ↓
+scripts/package_market_cases.py
+        ↓
+Market → time_box → Case JSON/JSONL package
 ```
 
-结构完整的新品事件都先进入 focal candidate pool。正式 Case 由 Market × time_box 组装，一个 Case 可有多个 focal。旧的“每时间段只选 top-1 focal”、`post90>=50`、固定 competitor 数不再在这里提前筛。
-
-## 6.2 t0 Shelf
-
-competitor 基础时间资格：
-
-```text
-同 Market
-product_id != focal
-first_rating_date < t0
-last_rating_date >= t0
-```
-
-ASOF 计算：
-
-```text
-pre_t0_review_count
-pre_t0_rating_mean
-pre_t0_recent_review_count
-```
-
-Top-150、8 CORE + 8 RESERVE 等旧 selection policy 没有继续写死。
-
-## 6.3 Case Population
-
-[`case_build/population/`](case_build/population/README.md) 只使用 `t0` 前历史计算：
-
-```text
-history_product_count
-days_since_last_event
-category_history_product_count
-market_history_product_count
-relation_stratum
-```
-
-同时输出 threshold scan，正式阈值冻结以后执行 eligibility 和确定性用户抽样。Case 用户集合在查询 future GT 前锁定。
-
-## 6.4 Ground Truth
-
-[`case_build/ground_truth/`](case_build/ground_truth/README.md)：
-
-```text
-GT2: all Case users -> product / none
-GT1: GT2 positives -> target product
-GT2 aggregate -> demand / share / rank
-```
-
-全部 future shelf 命中事件先保存在构建层，中间的 one-user-one-outcome policy 可以版本化重算。
-
-可选生成：
-
-```text
-review_activity_truth.parquet
-```
-
-用于完整 shelf 的未来评论量排名辅助对照。
-
-## 6.5 Quality Gate
-
-[`case_build/quality/`](case_build/quality/README.md) 汇总：
-
-```text
-商品侧结构与活动量
-selected users
-GT1 样本
-GT2 positive / none
-focal demand
-review activity
-外部价格 / BSR signals（可选）
-```
-
-输出：
-
-```text
-quality_metrics.parquet
-quality_decisions.parquet
-accepted_cases.parquet
-rejected_cases.parquet
-```
-
-结构性校验固定；研究阈值由版本化 JSON 配置。
+Production Parquet 不会被 packager 修改；`scripts/package_market_cases.py` 只读取已经完成的 Quality / GT1 / Market assets，重新组织为发布目录。
 
 ---
 
-# 7. External Signals
-
-[`external_signals/`](external_signals/README.md) 定义 provider-agnostic 历史表接口：
-
-```text
-source_partition
-product_id
-event_timestamp / event_date
-price
-bsr / sales_rank
-```
-
-对齐 Case 后输出：
-
-```text
-case_product_external_signals.parquet
-case_external_signals.parquet
-case_shelf_with_external.parquet
-```
-
-因此 Keepa API 获取逻辑以后只需要把原始响应整理成统一历史表，不侵入 Case / GT 主链。
-
-当前实际 Keepa token 调度、响应解析等 provider-specific 客户端仍在 [`external_signals/TODO.md`](external_signals/TODO.md)。
-
----
-
-# 8. Benchmark Split
-
-[`benchmark_split/`](benchmark_split/README.md) 只读取：
-
-```text
-market_id
-case_candidate_id
-t0
-```
-
-不读取 GT 数值决定归属。
-
-支持：
-
-```text
-market_holdout
-    整个 Market held out
-
-temporal_within_market
-    同 Market 早期 learning、后期 evaluation
-
-hybrid
-    unseen-market evaluation
-    + seen-market temporal evaluation
-```
-
----
-
-# 9. Final Export
-
-[`benchmark_export/`](benchmark_export/README.md) 在最终物化前检查：
-
-- Case ID 唯一；
-- focal 在 shelf 恰好一行；
-- GT2 覆盖全部 Case users；
-- GT2 target 都属于 shelf；
-- GT1 与 GT2 positives 一致；
-- `market_truth` 与 GT2 聚合一致；
-- split 对 accepted cases 一一覆盖。
-
-然后按 [`SCHEMA.md`](SCHEMA.md) 生成：
-
-```text
-benchmark_data/
-├── markets/<market_id>/
-│   ├── market_manifest.json
-│   ├── products.parquet
-│   ├── population/
-│   └── cases/<case_id>/...
-└── splits/
-```
-
-构建阶段尽量使用长表，只有 exporter 才按 Market / Case 正式物化文件。
-
----
-
-# 10. Evaluation
-
-[`evaluation/`](evaluation/README.md) 是模拟器输出的数值评测入口。
-
-最小用户预测格式：
-
-```text
-case_candidate_id
-user_id
-predicted_outcome_product_id   # 商品 / NULL
-```
-
-当前指标包括：
-
-```text
-GT1 choice accuracy
-GT2 full outcome accuracy
-market entry accuracy
-market-positive count error
-Kendall tau
-NDCG
-demand total error
-```
-
-如果没有单独商品预测，商品需求直接从个体用户预测聚合；也支持额外输入 `predicted_demand_count / score / rank`。
-
-概率校准、更多 ranking 指标和 review text Turing test 在 [`evaluation/TODO.md`](evaluation/TODO.md)。
-
----
-
-# 11. 从 v5 继续复用的逻辑
-
-新仓库主要继续使用 / 改造：
-
-```text
-market_discovery/*
-product_time_summary
-rating daily aggregation
-Market-product timeline
-active competitor interval sweep
-Market pre-t0 cumulative features
-competitor time qualification
-product cumulative review counts
-ASOF pre-t0 features
-future-event join
-market review activity ranking
-```
-
-主要移除的是旧 benchmark 强绑定的 selection / packaging policy：
-
-```text
-每时间段 top-1 focal
-固定 post90 hard gate
-固定 competitor hard gate
-Top-150
-8 CORE + 8 RESERVE
-旧 case packaging 层级
-```
-
----
-
-# 12. 目录
+# 8. Repository Layout
 
 ```text
 AmazonReviewsCases/
 ├── README.md
+├── PIPELINE.md
 ├── SCHEMA.md
 ├── TODO.md
-├── requirements.txt
-├── paths.py
-├── utils.py
 │
 ├── data_prep/
 ├── population_scan/
@@ -453,7 +330,25 @@ AmazonReviewsCases/
 ├── external_signals/
 ├── benchmark_split/
 ├── benchmark_export/
-└── evaluation/
+├── evaluation/
+└── scripts/
+    └── package_market_cases.py
 ```
 
-每个主要目录都有自己的 `README.md` 和 `TODO.md`（Market Discovery 使用 `TODO_CROSS_PATH.md`）。已经确定的层级、时间语义和 GT 两层结构保持稳定；尚未确定的阈值与研究选择通过 TODO 和配置接口显式保留。
+核心实现可直接查看：
+
+- [`case_build/focal_selection.py`](case_build/focal_selection.py)
+- [`case_build/shelf.py`](case_build/shelf.py)
+- [`case_build/quality/README.md`](case_build/quality/README.md)
+- [`scripts/package_market_cases.py`](scripts/package_market_cases.py)
+
+---
+
+# 9. Release
+
+- **Electronics v1**: [`Electronics_v1_cases`](https://github.com/26huasheng/AmazonReviewsCases/releases/tag/Electronics_v1_cases)
+- Archive: `Electronics_v1_cases.tar.gz`
+- Contents: **381 Markets / 2424 Cases / 2493 focals**
+- Quality freeze: **6–16 competitors / GT1 users ≥ 20 / history ≥ 3 / recency ≤ 365 days**
+
+后续版本如修改 Market、Case、GT 或 Quality 口径，应通过新的 release/tag 发布，避免覆盖已有 benchmark 数据。
