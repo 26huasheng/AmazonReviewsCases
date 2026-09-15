@@ -204,41 +204,37 @@ scripts/package_market_cases.py
 
 目标目录 contract 见 `SCHEMA.md`。
 
-注意：当前 main 的 packager/上游 canonical events 尚未完整体现 Release 中已经存在的 history review-text enrichment。修复时应增加一个只读 enrichment path，而不是改 Case/GT1/Quality。
+History review text is attached after packaging via `scripts/attach_history_review_text.py` (`--reviews-jsonl`). It must not change event identity or GT1.
 
 ## 10. Mixed-version modules
 
 ### Production/current semantics
 
 ```text
+data_prep/
+population_scan/                 # upstream user pool only
 market_discovery/
+market_build/                    # behavior components → focal diversity
 case_build/focal_selection.py
 case_build/shelf.py
-case_build/ground_truth/ GT1 path
+case_build/ground_truth/         # GT1 default
 case_build/quality/
+configs/curation/Electronics/clean_market_registry.csv
+scripts/apply_clean_market_registry.py
 scripts/package_market_cases.py
+scripts/attach_history_review_text.py
 ```
 
-### Current concept but implementation requires reconciliation
+### Legacy / experimental (not v1 release)
 
 ```text
-market_build/
-market_build/behavior_graph/
-review-text enrichment path
-clean-market packaging inputs
-```
-
-### Experimental / legacy for Electronics v1
-
-```text
-population_scan/
-case_build/population/
-benchmark_split/
-benchmark_export/
-evaluation/
-external_signals/
-behavior_graph competitor-selection branch
-GT2 branch in case_build/ground_truth/
+legacy/benchmark_export/
+legacy/benchmark_split/
+legacy/case_build_population/
+experimental/evaluation/
+experimental/external_signals/
+market_build/behavior_graph/ BehaviorGraphCasePipeline (legacy competitor)
+case_build/ground_truth/ optional --case-users GT2 branch
 ```
 
 ## 11. Safe code-cleanup rule

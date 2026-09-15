@@ -114,32 +114,24 @@ Electronics_v1_cases/
 
 只为实际存在 accepted Case 的 time box 建目录。
 
-## Production path vs mixed legacy code
-
-当前应当作为 v1 生产语义依据的模块：
+## Production path
 
 ```text
-market_discovery/
-market_build/                 # assets；其中 behavior_graph 实现仍需代码梳理
-case_build/ discover/select/shelf
-case_build/ground_truth/      # GT1 为 production；GT2 branch 为 experimental
-case_build/quality/
-scripts/package_market_cases.py
+data_prep
+→ population_scan          # category user pool for market_build assets, not GT1
+→ market_discovery
+→ market_build             # including behavior components for focal diversity
+→ case_build discover / select / shelf
+→ GT1
+→ Quality
+→ scripts/apply_clean_market_registry.py
+→ scripts/package_market_cases.py
+→ scripts/attach_history_review_text.py
 ```
 
-当前 Release **没有**把 GT2 population/none 任务打包为正式 benchmark。以下目录包含旧版或实验语义，不能直接视为 `Electronics_v1_cases` 正式链路：
+Clean-market list: `configs/curation/Electronics/clean_market_registry.csv` (manual; 657 CLEAN names → 381 Markets with accepted Cases).
 
-```text
-population_scan/
-case_build/population/
-benchmark_split/
-benchmark_export/
-evaluation/
-external_signals/
-market_build/behavior_graph/ 中的 competitor-selection branch
-```
-
-这些代码在完成本地版本审计前不应删除，也不应反向覆盖已确认正确的生产实现。
+GT2, old graph competitor selection, `legacy/`, and `experimental/` are **not** the Electronics v1 release path.
 
 ## Documentation
 

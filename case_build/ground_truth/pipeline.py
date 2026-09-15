@@ -19,7 +19,10 @@ from .tables import write_choice_truth, write_market_truth, write_population_tru
 
 
 class GroundTruthPipeline:
-    """固定 Case 用户后再查询 future，生成 GT1 / GT2 / 商品级聚合。"""
+    """Electronics v1 production path is GT1 (no --case-users).
+
+    Passing --case-users enables a legacy GT2 branch; it is not packaged in v1.
+    """
 
     def __init__(
         self,

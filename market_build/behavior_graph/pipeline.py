@@ -172,7 +172,10 @@ class BehaviorGraphBuildPipeline(_DuckDBStage):
 
 
 class BehaviorGraphCasePipeline(_DuckDBStage):
-    """用 pre-t0 focal 共评关系把过大的 Case shelf 截到最多 16 个竞品。"""
+    """LEGACY: pre-t0 co-review competitor truncation.
+
+    Electronics v1 competitors come from case_build.shelf, not this pipeline.
+    """
 
     def __init__(
         self,

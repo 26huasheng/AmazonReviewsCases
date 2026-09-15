@@ -14,3 +14,5 @@ max_gt1_users = null
 ```
 
 旧 GT2/future-success 字段可以继续保留为兼容/实验配置，但在 Electronics v1 中必须是 inactive，不得因为配置存在就成为 acceptance gate。
+
+Electronics 人工 clean-market 名单：`configs/curation/Electronics/clean_market_registry.csv`，由 `scripts/apply_clean_market_registry.py` 应用到 Quality accepted 结果。

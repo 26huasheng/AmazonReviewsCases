@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gt1-shelf-events", type=Path)
     p.add_argument("--timeline", type=Path)
     p.add_argument("--review-activity-truth", type=Path)
-    # Unused by the frozen focal gate; kept so old wrappers still parse.
+    # Unused by the frozen focal gate (legacy/experimental inputs). Kept so old wrappers still parse.
     p.add_argument("--case-users", type=Path)
     p.add_argument("--population-truth", type=Path)
     p.add_argument("--market-truth", type=Path)

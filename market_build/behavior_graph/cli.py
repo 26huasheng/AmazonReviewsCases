@@ -22,7 +22,11 @@ def _add_rules(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SEMS behavior graph builder")
+    parser = argparse.ArgumentParser(
+        description="SEMS behavior graph builder. "
+        "Electronics v1 production uses market_build.pipeline for focal-diversity components; "
+        "the 'case' subcommand is legacy competitor selection."
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     full = sub.add_parser(
