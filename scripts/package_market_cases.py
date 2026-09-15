@@ -105,6 +105,7 @@ class MarketCasePackager:
         self.clean_dir = clean_quality_dir.expanduser().resolve()
         self.output_dir = output_dir.expanduser().resolve()
         self.overwrite = overwrite
+        self.reviews_jsonl = None
         self.staging = self.output_dir / "_staging"
 
         self.paths = {
@@ -530,6 +531,11 @@ class MarketCasePackager:
             "integrity_issues": issues,
         }
         write_json(self.output_dir / "package_summary.json", payload)
+        if getattr(self, "reviews_jsonl", None) is not None:
+            from scripts.attach_history_review_text import attach_review_text
+
+            payload["review_text"] = attach_review_text(self.output_dir, self.reviews_jsonl)
+            write_json(self.output_dir / "package_summary.json", payload)
         return payload
 
 
@@ -539,6 +545,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--clean-quality-dir", type=Path, required=True)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument(
+        "--reviews-jsonl",
+        type=Path,
+        help="Amazon Reviews 2023 category jsonl; review text is attached to histories/events.jsonl only",
+    )
     return p
 
 
@@ -550,6 +561,7 @@ def main() -> None:
         args.output_dir,
         args.overwrite,
     )
+    worker.reviews_jsonl = args.reviews_jsonl
     try:
         result = worker.run()
     finally:
