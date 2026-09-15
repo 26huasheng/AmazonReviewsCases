@@ -1,15 +1,7 @@
-# Case quality TODO
+# quality TODO
 
-Focal-level Quality 已冻结：
-
-```text
-min_competitors = 6
-max_competitors = 16
-min_gt1_users = 20
-min_history_product_count = 3
-max_days_since_last_event = 365
-```
-
-GT1 无人数上限。未来 choice / demand / post90 不作为 gate。
-
-Keepa / 外部销量仍是独立阶段，不进入本层默认门槛。
+- [ ] 保持默认 6–16 competitors / GT1>=20 / no GT1 cap。
+- [ ] 增加 focal-first removal + Case shelf rebuild regression test。
+- [ ] 增加 GT1 uniqueness/local-shelf/window/history consistency tests。
+- [ ] 检查配置中旧 GT2/future-success fields 始终 inactive。
+- [ ] Quality 清理不得改变现有 accepted/rejected semantics。

@@ -1,359 +1,325 @@
-# SEMS Benchmark Data Schema
+# SEMS Electronics v1 Release Schema
 
-本文件定义 `AmazonReviewsCases` 最终 benchmark 产物。主结构固定为 **Market → Cases**。Case 是 **Final Market × time_box**：一个 Case 可含 1 个或少数几个 focal，共享 users 与 union shelf；GT 保留到 focal 粒度。
+本文件定义当前 `Electronics_v1_cases` 的 **冻结输出 contract**。这里描述的是正式发布包，不是内部 Parquet 表，也不是未来 GT2 设计。
 
----
+> 结构冻结原则：不得因为整理代码而重命名、移动、合并或拆分这些正式文件；不得把旧版 `case_users / market_population / GT2` 重新塞回当前 GT1 Release。内部实现和中间表可以重构，但必须保持发布语义与输出兼容。
 
-# 1. 最终目录
+## 1. Directory contract
 
 ```text
-benchmark_data/
-├── benchmark_manifest.json
-├── validation_report.json
-├── markets/
-│   └── <market_id>/
-│       ├── market_manifest.json
-│       ├── products.parquet
-│       ├── population/
-│       │   ├── users.parquet
-│       │   └── interactions.parquet
-│       └── cases/
-│           └── <case_id>/
-│               ├── case_manifest.json
-│               ├── shelf.parquet
-│               ├── users.parquet
-│               └── ground_truth/
-│                   ├── choice_truth.parquet
-│                   ├── population_truth.parquet
-│                   └── market_truth.parquet
-└── splits/
-    ├── learning.json
-    ├── validation.json
-    └── evaluation.json
+Electronics_v1_cases/
+└── {market_name}/
+    ├── market.json
+    ├── users/
+    │   ├── users.jsonl
+    │   └── histories/
+    │       ├── summary.jsonl
+    │       └── events.jsonl
+    ├── products/
+    │   └── products.jsonl
+    └── cases/
+        └── {time_box_id}/          # only when an accepted Case exists
+            └── {case_id}/
+                ├── case.json
+                ├── focals.jsonl
+                ├── shelf.jsonl
+                ├── focal_competitors.jsonl
+                └── ground_truth/
+                    ├── gt1_users.jsonl
+                    └── choice_truth.jsonl
 ```
 
----
+每个 Final Market 以规范化 `market_name` 作为顶层目录名。若某个 time box 没有 accepted Case，不创建空目录。同一 `Market × time_box` 最多一个 Case，但仍保留显式 `{case_id}/` 层。
 
-# 2. Market 层
+## 2. Market level
 
-## 2.1 `market_manifest.json`
+### `market.json`
 
-```json
-{
-  "market_id": "market_001",
-  "market_name": "smart_watch",
-  "source_partition": "Electronics",
-  "source_market_ids": ["local_xxx", "local_yyy"],
-  "source_category_paths": [
-    ["Electronics", "Wearable Technology", "Smartwatches"]
-  ],
-  "n_products": 37,
-  "n_population_users": 58214,
-  "case_ids": ["case_001", "case_002"]
-}
+Market-level metadata。核心语义至少包括：
+
+```text
+market_id
+market_name
+source_partition
+n_products
+n_cases
+n_focals
+available_time_boxes
 ```
 
-| 字段 | 含义 |
-|---|---|
-| `market_id` | Final Market ID |
-| `market_name` | 规范化后的 Market 名称 |
-| `source_partition` | Amazon Reviews 大类 |
-| `source_market_ids` | cross-path 合并前来源 local market IDs |
-| `source_category_paths` | 来源 category paths |
-| `n_products` | 长期商品 universe 大小 |
-| `n_population_users` | Market shared population 大小 |
-| `case_ids` | 当前 Market 下 accepted Case IDs |
+这里只描述长期 Market 与本 Release 中实际存在的 Cases，不承担某个 focal 的 t0/local-shelf/GT1 信息。
 
-Market manifest 不保存某个具体 `t0` 的 focal / competitor 角色。
+### `products/products.jsonl`
 
-## 2.2 `products.parquet`
+一行一个 Final Market 长期商品。当前生产资产来自 `market_build/market_products.parquet`。核心字段包括：
 
-一行一个长期商品：
+```text
+market_id
+market_label / market_name context
+source_partition
+product_id
+title
+category_path
+first_review_date
+first_available_date           # source available 时
+store                          # source available 时
+metadata_available
+metadata_snapshot_price        # snapshot only; not historical t0 price
+```
 
-| 字段 | 含义 |
-|---|---|
-| `product_id` | 商品键 |
-| `title` | 商品标题 |
-| `source_partition` | Amazon 大类 |
-| `category_path` | category path |
-| `first_review_date` | 首评时间 |
-| `first_available_date` | metadata 可获得时保存 |
-| `store` | metadata store / 展示品牌字段，可获得时保存 |
-| `metadata_available` | 是否存在 metadata |
-| `metadata_snapshot_price` | Amazon metadata 快照价，可选；不等于历史 t0 价格 |
+这是长期商品 universe，不是某个 Case 的 shelf。
 
----
+## 3. Market users and pre-t0 histories
 
-# 3. Market Population
+### `users/users.jsonl`
 
-## 3.1 `population/users.parquet`
-
-最终最小字段：
+当前 v1 中它是该 Market 所有 **accepted focals 的正式 GT1 users 的去重 registry**，最小字段：
 
 ```text
 user_id
 ```
 
-Market 下多个 Case 共用这份 shared population。Case 再从这里选自己的用户子集。
+它不是旧版随机抽样 `market_population`，也不是 GT2 background population。
 
-## 3.2 `population/interactions.parquet`
+### `users/histories/summary.jsonl`
 
-Market population 可用的共享用户轨迹：
-
-| 字段 | 含义 |
-|---|---|
-| `user_id` | 用户键 |
-| `product_id` | 商品键 |
-| `timestamp` | 观测事件时间 |
-| `rating` | 星级，可为空 |
-| `source_partition` | 事件来源大类 |
-| `verified_purchase` | 源数据可获得时保存 |
-
-同一用户历史不在 Case 下重复存储。运行某个 Case 时按它自己的 `t0` 使用历史部分。
-
----
-
-# 4. Case 层
-
-## 4.1 `case_manifest.json`
-
-```json
-{
-  "case_id": "case_001",
-  "market_id": "market_001",
-  "time_box_id": "2022-H2",
-  "n_focals": 2,
-  "population_cutoff": "2022-07-03",
-  "n_shelf_products": 18,
-  "n_selected_users": 2000,
-  "quality_status": "accepted"
-}
-```
-
-时间窗口统一使用半开区间：
+粒度：
 
 ```text
-[evaluation.start, evaluation.end_exclusive)
+case_id + focal_id + user_id
 ```
 
-| 字段 | 含义 |
-|---|---|
-| `case_id` | Case ID = hash(source_partition, market_id, time_box_id) |
-| `market_id` | 所属 Final Market |
-| `time_box_id` | 时间段 |
-| `n_focals` | 本 Case 选中的 focal 数 |
-| `population_cutoff` | 共享用户历史截断，当前 `min(focal.t0)` |
-| `n_shelf_products` | union shelf 商品数 |
-| `n_selected_users` | 本 Case 固定用户数 |
-| `quality_status` | 最终质量状态 |
-
-每个 focal 自己的 `t0` / evaluation window 在 `case_focals` / GT 行上，不挤进单一 Case manifest 字段。
-
-## 4.2 `shelf.parquet`
-
-| 字段 | 含义 |
-|---|---|
-| `product_id` | 商品键 |
-| `is_focal` | 是否为本 Case 的某个 focal |
-| `is_competitor` | 是否为某个 focal 的 selected competitor；可与 `is_focal` 同时为真 |
-| `pre_t0_review_count` | t0 前累计评论 / 评分事件量 |
-| `pre_t0_rating_mean` | t0 前平均评分，可为空 |
-| `price_at_t0` | 历史 t0 价格，可获得时保存 |
-| `pre_t0_recent_review_count` | 最近活动窗口内评论量，可作为扩展字段 |
-| `metadata_snapshot_price` | metadata 快照价，可作为扩展字段 |
-
-一个 competitor 的当前基础时间资格：
+因为历史摘要依赖 focal 自己的 t0，所以同一用户在不同 focal 下可以出现不同摘要。Release/生产中可包含：
 
 ```text
-同一 Market
-product_id != focal
-first_review_date < t0
-last_review_date >= t0
-```
-
-## 4.3 `users.parquet`
-
-最终只需要：
-
-```text
+case_id
+focal_id
 user_id
+t0
+history_event_count
+history_product_count
+last_event_date
+days_since_last_event
+category_history_event_count
+category_history_product_count
+market_history_event_count
+market_history_product_count
 ```
 
-用户 eligibility / sampling 特征属于构建审计表，不复制进最终 Case。
+只写实际已有、可追溯的字段；不要为了“补全 schema”凭空计算不存在的字段。
 
----
+### `users/histories/events.jsonl`
 
-# 5. Ground Truth
-
-## 5.1 GT1 — `ground_truth/choice_truth.parquet`
-
-**Conditional Individual Choice**：已知用户在 evaluation window 内发生了当前 shelf 的目标交互，实际目标商品是什么。
-
-| 字段 | 含义 |
-|---|---|
-| `case_id` / `focal_id` | Case × focal |
-| `user_id` | 用户键 |
-| `product_id` | 确定目标商品 |
-| `event_timestamp` | 被 outcome policy 选中的目标事件时间 |
-
-GT1 不包含 `none`。
-
-## 5.2 GT2 — `ground_truth/population_truth.parquet`
-
-覆盖 Case `users.parquet` 中全部用户：
-
-| 字段 | 含义 |
-|---|---|
-| `case_id` / `focal_id` | Case × focal |
-| `user_id` | 用户键 |
-| `outcome_product_id` | 真实商品结果；无目标交互时为空 |
-| `event_timestamp` | 有商品 outcome 时对应事件时间，否则为空 |
-
-语义：
+粒度是 focal-specific pre-t0 user history event。核心键/字段：
 
 ```text
-outcome_product_id = product_id  -> 命中 shelf 商品
-outcome_product_id = NULL        -> none
+case_id
+focal_id
+user_id
+event_date
+event_timestamp
+product_id
+rating
+verified_purchase
+source_partition
+review_title                  # 当前 Release 已确认可包含
+review_text                   # 当前 Release 已确认可包含
 ```
 
-`none` 表示公开 Amazon Reviews 观测数据中没有看到该用户在 evaluation window 对当前 shelf 产生目标交互，不代表完整订单世界里一定没有购买。
-
-同一用户 future window 有多条 shelf 事件时，由显式 `outcome_policy` 压成一个商品。构建层会保留全部 future events 供重新计算；正式 benchmark 需要冻结 policy 版本。
-
-## 5.3 `ground_truth/market_truth.parquet`
-
-由 GT2 聚合：
-
-| 字段 | 含义 |
-|---|---|
-| `case_id` / `focal_id` | Case × focal |
-| `product_id` | 该 focal 局部货架商品 |
-| `demand_count` | GT2 中命中该商品的用户数 |
-| `demand_share` | 在 market-positive 用户中的份额 |
-| `rank` | 按 `demand_count` 排名，确定性 tie-break 用 `product_id` |
-
-`none` 不作为商品参加排名。
-
-GT1 必须与 GT2 正例完全一致。
-
----
-
-# 6. 辅助 / 派生 Truth
-
-构建过程中可以存在但不要求进入最终 canonical GT 目录：
+硬约束：
 
 ```text
-future_market_events.parquet
-positive_user_outcomes.parquet
-review_activity_truth.parquet
-weekly / cumulative truth（以后可选）
+event_timestamp < focal.t0
 ```
 
-其中 `review_activity_truth` 对完整 shelf 的 future 评论量直接做排名，属于商品侧辅助真值 / 质量信号；它不替代 GT2 聚合的 `market_truth`。
+当前公开 Release 明确说明这里的 history events 带 `review_title / review_text`；3,894,971 条 history events 中 3,417,022 条有 `review_text`。正文只在源数据实际存在时保留，不伪造，不要求 `users.jsonl` 或 `products.jsonl` 保存正文。
 
----
+## 4. Case level
 
-# 7. Benchmark Split
-
-Split 文件只保存引用：
-
-```json
-{
-  "split_name": "evaluation",
-  "markets": [
-    {
-      "market_id": "market_001",
-      "case_ids": ["case_003"],
-      "evaluation_regime": "seen_market_temporal"
-    },
-    {
-      "market_id": "market_009",
-      "case_ids": ["case_080", "case_081"],
-      "evaluation_regime": "unseen_market"
-    }
-  ]
-}
-```
-
-支持：
+### Case identity
 
 ```text
-seen-market temporal evaluation
-unseen-market evaluation
+Case = Final Market × time_box
+case_id = stable hash(source_partition, market_id, time_box_id)
 ```
 
-Split 不复制 Case 数据，也不根据 GT 数值决定归属。
+Case 内包含 1..N surviving focals。不同 focal 拥有各自 t0、evaluation window、competitor relation 与 GT1。
 
----
+### `case.json`
 
-# 8. 构建层长表
-
-为了全量处理效率，上游阶段主要保留长表，最后由 `benchmark_export/` 才按 Market / Case 物化小文件。
-
-主要构建表：
+核心字段：
 
 ```text
-population_scan/users.parquet
-
-market_discovery/final_market.parquet
-
-market_build/
-  market_products.parquet
-  market_population.parquet
-  canonical_user_events.parquet
-  user_history_cumulative.parquet
-  user_category_history_cumulative.parquet
-  user_market_history_cumulative.parquet
-
-case_build/
-  case_candidates.parquet
-  case_shelf.parquet
-
-case_build/population/
-  case_user_features.parquet
-  case_user_eligibility.parquet
-  case_users.parquet
-
-case_build/ground_truth/
-  choice_truth.parquet
-  population_truth.parquet
-  market_truth.parquet
-
-case_build/quality/
-  quality_focal_metrics.parquet
-  quality_focal_decisions.parquet
-  quality_case_metrics.parquet
-  quality_case_decisions.parquet
-  accepted_focals.parquet
-  rejected_focals.parquet
-  accepted_cases.parquet
-  rejected_cases.parquet
-  accepted_focal_competitors.parquet
-  accepted_case_shelf.parquet
-
-benchmark_split/
-  split_assignments.parquet
+case_id
+market_id
+market_name
+time_box_id
+time_box_start
+time_box_end
+n_focals
+focal_ids
 ```
 
-这些表可以比最终 schema 多保留审计字段；`benchmark_export/` 负责裁成最终字段并执行跨表一致性检查。
-
----
-
-# 9. 核心不变量
-
-最终 benchmark 必须满足：
+现有生产表/Release 中可能还保留：
 
 ```text
-Market product universe 可复用
-Case shelf 属于所属 Market
-Case = Market × time_box，含 1 个或少数 focal
-Case users 属于 Market shared population
-Case population 在 future GT 查询前固定（cutoff = min focal t0）
-每个 focal 的 GT2 覆盖全部 Case users
-每个 focal 的 GT2 product outcome 只能是该 focal 局部货架 / none
-GT1 == GT2 positives（同一 Case×focal）
-market_truth == 该 focal 的 GT2 聚合
-split 对 accepted cases 一一覆盖
+population_cutoff
+population_cutoff_policy
 ```
 
-这套 schema 的目标是把共享资产、时间事件、用户选择真值和最终评测隔离清楚，同时避免在每个 Case 下重复保存 Market 级历史。
+这两个字段属于旧 GT2/population lineage 的 provenance，不是当前 GT1 语义的必要输入，也不得据此重新把 GT1 定义成 preselected Case population。
+
+### `focals.jsonl`
+
+一行一个 surviving focal。核心语义：
+
+```text
+case_id
+focal_id
+focal_product_id
+t0
+evaluation_start
+evaluation_end_exclusive
+selected_competitor_count
+gt1_user_count
+```
+
+允许保留上游已有的审计字段。不要把多个 focal 强行压成一个 Case-level t0。
+
+### `shelf.jsonl`
+
+这是 **Quality 后重建的 Case union shelf**，必须来自 accepted/surviving focals：
+
+```text
+case_shelf = union(
+  each surviving focal product,
+  each surviving focal selected competitors
+)
+```
+
+多 focal Case 中，一个商品可以既是某个 focal，又是另一个 focal 的 competitor。Case union shelf 不等于任意一个 focal 的 local shelf。
+
+### `focal_competitors.jsonl`
+
+显式记录 focal → selected competitor 关系。对任一 focal：
+
+```text
+local_shelf = {focal_product_id} ∪ {selected competitor_product_id}
+```
+
+正式 competitor 时间资格：
+
+```text
+same Final Market
+product_id != focal_product_id
+first_rating_date < t0
+last_rating_date >= t0
+```
+
+最多 16 个。候选 >16 时按 t0 前 recent activity、累计 activity、product_id 确定性排序。Behavior graph 不参与这里的正式排序。
+
+## 5. GT1
+
+### `ground_truth/gt1_users.jsonl`
+
+一行一个 `case_id + focal_id + user_id` 的正式 GT1 membership。GT1 user 必须：
+
+1. 在 focal local shelf 的 `[t0,t0+90d)` 中至少出现一个真实 Amazon rating/review observation；
+2. 经过 `first_observed_event` reducer 后拥有唯一 choice；
+3. t0 前 `history_product_count >= 3`；
+4. `days_since_last_event <= 365`。
+
+GT1 不从旧 `case_users` 预抽，不设上限 cap。
+
+### `ground_truth/choice_truth.jsonl`
+
+粒度：
+
+```text
+case_id + focal_id + user_id
+```
+
+核心字段/语义：
+
+```text
+product_id              # first observed choice on local shelf
+outcome_is_focal
+event_timestamp
+rating
+verified_purchase
+outcome_policy           # first_observed_event
+history_product_count
+days_since_last_event
+```
+
+它是 observed choice proxy，不是完整 purchase log，也不包含 `none`。
+
+**正文边界：** 当前 Release 明确保证 review 正文的是 `users/histories/events.jsonl` 的 pre-t0 history。`choice_truth` 对应 future event 的 `review_title / review_text` 是否打包没有被当前 Release contract 保证，因此不能把 future review text 设为必需字段，也不能从 history 有正文推断它一定存在。
+
+## 6. Time boxes
+
+当前正式默认：
+
+```text
+1996: single-year box
+1997–2020: mainly 2-year boxes
+2021–2023: half-year boxes
+```
+
+所有窗口使用半开区间 `[start,end)`。无 accepted Case 的 time box 不出现在目录中。
+
+## 7. Quality invariants
+
+每个 surviving focal 必须满足：
+
+```text
+valid t0
+evaluation window complete
+selected competitors in [6,16]
+GT1 users >= 20
+history_product_count >= 3
+days_since_last_event <= 365
+```
+
+同时必须满足：
+
+- focal 在 final Case shelf 中；
+- competitor 不自指、不重复；
+- relation count 与 stored count 一致；
+- 每个 selected competitor 都在 final Case shelf；
+- competitor 满足 `first_rating_date < t0 <= last_rating_date`；
+- focal local shelf 恰好等于 focal + selected competitors；
+- `(case_id,focal_id,user_id)` choice 唯一；
+- choice product 属于 focal local shelf；
+- choice timestamp 落在 `[t0,evaluation_end_exclusive)`；
+- GT1 history/recency 满足规则；
+- 有中间事件表时，choice 可追溯到真实 window event。
+
+Quality 先在 focal 层执行；失败 focal 移除后重建 Case union shelf。Case 只在没有任何 surviving focal 时整体拒绝。
+
+## 8. What is NOT part of current Release contract
+
+以下不属于 `Electronics_v1_cases` 的正式输出：
+
+```text
+pre-sampled case_users
+market_population as GT1 users
+GT2 population_truth
+GT2 none task
+GT2 market_truth
+benchmark split files
+legacy parquet exporter layout
+behavior-graph-based competitor selection
+future-success filtering
+```
+
+## 9. Backward-compatible data-detail changes
+
+在不改目录/主键/语义的前提下，未来可以修复或补齐：
+
+- 由真实源数据补 `review_title / review_text`；
+- 修正 source plumbing、provenance、nullable source fields；
+- 增加不会改变 GT1 membership/choice 的可追溯审计字段；
+- 重构内部 Parquet/SQL/索引以提升性能或可复现性。
+
+禁止把这些“数据细节改进”变成新的筛选门槛，禁止重算已经冻结的 `Electronics_v1_cases` 语义来覆盖现有 Release。

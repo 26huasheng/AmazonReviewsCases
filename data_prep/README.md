@@ -1,53 +1,26 @@
 # data_prep
 
-下载 Amazon Reviews 2023 一个大类的全量源文件，并做成 Market Discovery 之前需要的基础表。
+`data_prep/` 是 Amazon Reviews 2023 的输入准备层，不定义 Market/Case/GT。
 
-不选择运行模式：始终要求 rating-only、metadata、full reviews 三类文件都在盘上。本地文件通过字段校验后不重下。
-
-## 源文件
-
-固定从 `https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023` 拉取：
+当前需要区分三类源数据：
 
 ```text
-data/reviews2023/benchmark/0core/rating_only/<Category>.csv
-data/reviews2023/raw/meta_categories/meta_<Category>.jsonl
-data/reviews2023/raw/review_categories/<Category>.jsonl
+rating-only events   -> 大规模时间/用户/商品事件索引
+metadata             -> 商品标题、类目、snapshot fields
+full reviews         -> review_title / review_text enrichment source
 ```
 
-默认 `data_root` 会解析到仓库旁已有的 `data/reviews2023`。
+现有代码已经知道三类路径并可下载 `rating / metadata / reviews`。但当前主 materialization 主要用 rating-only + metadata；full review 正文在正式 Release 中用于 **pre-t0 history event enrichment**，其完整 plumbing 需要在代码梳理阶段补回/确认。
 
-## 初筛产物
+禁止让 full-review enrichment 改变 rating-only canonical event 的主键语义、时间或 GT1 membership。
+
+核心稳定输入字段：
 
 ```text
-outputs/data_prep/<Category>/
-├── product_core.parquet
-├── product_core_cleaning.json
-├── rating_daily_summary.parquet
-├── product_time_summary.parquet
-├── rating_event_store/
-├── storage_metadata.json
-└── population_scan/
-    ├── users.parquet
-    ├── review_events.parquet   # 瘦表，不含正文
-    └── summary.json
+user_id
+parent_asin/product_id
+rating
+timestamp
 ```
 
-`product_core` 丢掉无 ID / 无标题 / 无 category path 的商品，并且只保留至少有一条 rating 的商品。`post90_rating_count` 是首评日起 90 天左闭右开窗口。
-
-本阶段不调用 LLM，不停在 Market Discovery。
-
-## 运行
-
-唯一需要确认的是大类名称：
-
-```bash
-python -m data_prep.cli
-```
-
-非交互：
-
-```bash
-python -m data_prep.cli --category Electronics
-```
-
-已有完整 cache 时默认跳过重建；`--force-rebuild` 会重做 parquet，仍不会重下已通过校验的源文件。
+商品 metadata 仅保留源中实际存在的字段。`metadata_snapshot_price` 不是历史 t0 价格。
